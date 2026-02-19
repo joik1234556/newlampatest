@@ -27,3 +27,11 @@
 - NVMe SSD
 - 1 Gbit/s uplink
 - Cloudflare (желательно Spectrum / TCP proxy для stream узлов)
+
+
+## Подключение плагина без 404
+
+Для LAMPA нужен **прямой URL на JS**, а не страница GitHub:
+- ✅ `https://<username>.github.io/<repo>/easy-mods.js`
+- ✅ `https://raw.githubusercontent.com/<username>/<repo>/main/textkoro-mods/plugin/easy-mods.js`
+- ❌ `https://github.com/<username>/<repo>/.../easy-mods.js`

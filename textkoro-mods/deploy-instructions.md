@@ -53,9 +53,13 @@ server {
 
 1. Загрузите `plugin/easy-mods.js` в GitHub-репозиторий.
 2. Включите GitHub Pages.
-3. Получите URL вида:
-   - `https://<username>.github.io/<repo>/easy-mods.js`
-4. В LAMPA: Плагины → Добавить по ссылке → вставить URL.
+3. Используйте **прямую ссылку на JS-файл**:
+   - GitHub Pages: `https://<username>.github.io/<repo>/easy-mods.js`
+   - или RAW: `https://raw.githubusercontent.com/<username>/<repo>/main/textkoro-mods/plugin/easy-mods.js`
+
+⚠️ Важно: ссылка вида `https://github.com/<user>/<repo>/.../easy-mods.js` (страница сайта GitHub) не подходит и в LAMPA даёт `404`.
+
+4. В LAMPA: Плагины → Добавить по ссылке → вставить прямой URL.
 
 ## 5) Настройка плагина в LAMPA
 

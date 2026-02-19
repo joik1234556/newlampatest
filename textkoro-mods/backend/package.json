@@ -1,13 +1,13 @@
 {
   "name": "easy-mods-backend",
-  "version": "1.0.0",
-  "description": "Backend API for Easy-Mods LAMPA plugin (dynamic sources + VIP)",
+  "version": "2.0.0",
+  "description": "Easy-mods backend: search + stream via TorrServer",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "dev": "NODE_ENV=development node server.js",
-    "lint": "node -e \"console.log('No linter configured')\""
+    "check": "node --check server.js && node --check routes/api.js && node --check config.js"
   },
   "engines": {
     "node": ">=18"

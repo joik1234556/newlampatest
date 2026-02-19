@@ -1,45 +1,29 @@
-# Easy-Mods (аналог modss.tv для LAMPA)
+# Easy-mods (LAMPA plugin + backend streaming)
 
-Полный комплект:
-- `backend/` — Node.js + Express API для динамической выдачи онлайн-источников и проверки VIP.
-- `plugin/koro-mods.js` — один файл плагина для LAMPA 1.12+.
+Проект состоит из:
+- `plugin/easy-mods.js` — единый плагин для LAMPA 1.12+
+- `backend/` — Node.js + Express API, который делает поиск и выдает stream URL через TorrServer
 
-## Быстрый старт
+## Что делает Easy-mods
 
-1. Настройте и запустите backend (см. `deploy-instructions.md`).
-2. Откройте `plugin/koro-mods.js` и задайте `DEFAULT_API` на ваш URL API.
-3. Загрузите `koro-mods.js` на GitHub Pages.
-4. Добавьте ссылку на плагин в LAMPA.
+1. Показывает источники в «Онлайн»: VeoVeo, ViDEX, ManGo (VIP), FXpro (VIP), FlixSOD (VIP), Alloha (VIP), Easy-mods, HDRezka (VIP), HDVB (VIP).
+2. По источнику **Easy-mods** выполняется запрос на ваш backend `/search`.
+3. Backend возвращает список потоков (качество/озвучка/сиды/размер).
+4. Пользователь выбирает вариант.
+5. Плагин открывает `streamUrl` в плеере LAMPA (m3u8/stream URL).
 
-## Динамические источники
+## Backend API
 
-- Источники хранятся в `backend/sources.json`.
-- API всегда читает файл при запросе, поэтому изменения применяются без перезапуска.
-- Бесплатные пользователи получают только `vip: false` источники.
-- VIP-пользователи получают весь список.
+- `GET /health`
+- `GET /sources?isVip=true|false`
+- `POST /search` — поиск через Jackett/сервер
+- `POST /stream` — принять magnet, выбрать TorrServer и вернуть playlist URL
+- `GET /stream?magnet=...` — быстрый вариант без POST
 
-## VIP-ключи
+## Рекомендуемая инфраструктура для старта (до ~10 зрителей 4K)
 
-- Ключи хранятся в `backend/vip-keys.json`.
-- Проверка ключа:
-  - `POST /api/check-vip`
-- Получение источников с VIP:
-  - `GET /api/sources?vipKey=ВАШ_КЛЮЧ`
-
-## Рекомендуемая структура
-
-```text
-textkoro-mods/
-├── backend/
-│   ├── server.js
-│   ├── config.js
-│   ├── sources.json
-│   ├── vip-keys.json
-│   ├── package.json
-│   └── routes/
-│       └── api.js
-├── plugin/
-│   └── koro-mods.js
-├── README.md
-└── deploy-instructions.md
-```
+- 4–8 vCPU
+- 16–32 GB RAM
+- NVMe SSD
+- 1 Gbit/s uplink
+- Cloudflare (желательно Spectrum / TCP proxy для stream узлов)

@@ -1,0 +1,83 @@
+[
+  {
+    "id": "veoveo",
+    "name": "VeoVeo",
+    "icon": "🎥",
+    "vip": false,
+    "quality": "HD, FullHD, 4K",
+    "description": "Хорошие дубляжи, стабильный",
+    "balancer": "https://veoveo.cc"
+  },
+  {
+    "id": "videx",
+    "name": "ViDEX",
+    "icon": "📺",
+    "vip": false,
+    "quality": "HD, FullHD",
+    "description": "Много озвучек, быстро",
+    "balancer": "https://videx.cc"
+  },
+  {
+    "id": "mango",
+    "name": "ManGo",
+    "icon": "🍊",
+    "vip": true,
+    "quality": "4K HDR10+, FullHD",
+    "description": "Качественные релизы, 4K",
+    "balancer": "https://mango.go"
+  },
+  {
+    "id": "fxpro",
+    "name": "FXpro",
+    "icon": "⭐",
+    "vip": true,
+    "quality": "4K HDR, +UA дубляж",
+    "description": "Профессиональный дубляж, VIP",
+    "balancer": "https://fxpro.cc"
+  },
+  {
+    "id": "flixsod",
+    "name": "FlixSOD",
+    "icon": "🔥",
+    "vip": true,
+    "quality": "4K SDR, 1080p",
+    "description": "Новинки быстро, VIP",
+    "balancer": "https://flixsod.cc"
+  },
+  {
+    "id": "alloha",
+    "name": "Alloha",
+    "icon": "🌊",
+    "vip": true,
+    "quality": "4K HDR, много озвучек",
+    "description": "Очень быстрый, 4K",
+    "balancer": "https://alloha.tv"
+  },
+  {
+    "id": "korot-mods",
+    "name": "KoroT Mods",
+    "icon": "💎",
+    "vip": true,
+    "quality": "4K HDR, +UA",
+    "description": "Собственный балансер",
+    "balancer": "https://your-domain.com/balancer"
+  },
+  {
+    "id": "hdrezka",
+    "name": "HDRezka",
+    "icon": "🎞️",
+    "vip": true,
+    "quality": "4K SDR, дубляж",
+    "description": "Классика, много озвучек",
+    "balancer": "https://hdrezka.ag"
+  },
+  {
+    "id": "hdvb",
+    "name": "HDVB",
+    "icon": "📀",
+    "vip": true,
+    "quality": "FullHD, 4K",
+    "description": "Стабильный, много сериалов",
+    "balancer": "https://hdvb.cc"
+  }
+]

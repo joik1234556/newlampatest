@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const apiRouter = require('./routes/api');
+const balancersRouter = require('./routes/balancers');
 const config = require('./config');
 
 const app = express();
@@ -19,12 +20,15 @@ app.get('/', (_req, res) => {
       sources: 'GET /sources?isVip=true|false',
       search: 'POST /search {title,year,jackettUrl?,jackettKey?}',
       streamPost: 'POST /stream {magnet}',
-      streamGet: 'GET /stream?magnet=...'
+      streamGet: 'GET /stream?magnet=...',
+      balancersList:   'GET /api/balancers/list',
+      balancersSearch: 'GET /api/balancers/search?balancer=kodik&kp_id=12345'
     }
   });
 });
 
 app.use('/', apiRouter);
+app.use('/api/balancers', balancersRouter);
 
 app.use((req, res) => {
   res.status(404).json({ ok: false, error: 'not_found', path: req.path });

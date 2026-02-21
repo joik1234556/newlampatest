@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "NODE_ENV=development node server.js",
-    "check": "node --check server.js && node --check routes/api.js && node --check config.js"
+    "check": "node --check server.js && node --check routes/api.js && node --check routes/balancers.js && node --check config.js"
   },
   "engines": {
     "node": ">=18"

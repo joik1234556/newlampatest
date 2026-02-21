@@ -16,6 +16,15 @@ services:
       JACKETT_KEY: "PUT_YOUR_JACKETT_KEY"
       TORR_SERVERS: "http://torrserver-1:8090,http://torrserver-2:8090"
       STREAM_PUBLIC_BASE: "https://stream.your-domain.com"
+      # Balancer API tokens — fill in your own keys
+      KODIK_TOKEN: ""
+      VIDEOCDN_TOKEN: ""
+      ALLOHA_TOKEN: ""
+      ZETFLIX_TOKEN: ""
+      ASHDI_TOKEN: ""
+      FILMIX_TOKEN: ""
+      FILMIX_DEV_ID: ""
+      HDREZKA_TOKEN: ""
     ports:
       - "3000:3000"
     depends_on:

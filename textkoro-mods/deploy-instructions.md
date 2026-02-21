@@ -61,7 +61,37 @@ server {
 
 4. В LAMPA: Плагины → Добавить по ссылке → вставить прямой URL.
 
-## 5) Настройка плагина в LAMPA
+## 5) Настройка balancer-mods.js в LAMPA
+
+1. Загрузите `plugin/balancer-mods.js` в GitHub-репозиторий и включите GitHub Pages (или используйте RAW URL).
+2. В LAMPA: Плагины → Добавить по ссылке → вставить прямой URL.
+3. В настройках плагина заполните:
+   - `Balancer-Mods: Proxy URL` → `https://mods.example.com/api/balancers`
+   - `Balancer-Mods: Filmix токен` → ваш Filmix-токен (опционально)
+   - `Balancer-Mods: Управление источниками` → включить/отключить балансеры
+
+## 6) Переменные окружения для балансеров
+
+Задайте токены API нужных балансеров в `docker-compose.yml` или как env vars сервера:
+
+```env
+KODIK_TOKEN=ваш_kodik_token
+VIDEOCDN_TOKEN=ваш_videocdn_token
+ALLOHA_TOKEN=ваш_alloha_token
+ZETFLIX_TOKEN=ваш_zetflix_token
+ASHDI_TOKEN=ваш_ashdi_token
+FILMIX_TOKEN=ваш_filmix_token
+FILMIX_DEV_ID=ваш_filmix_dev_id
+# HDRezka работает без токена (парсинг HTML)
+```
+
+Проверка балансеров:
+```bash
+curl "http://127.0.0.1:3000/api/balancers/list"
+curl "http://127.0.0.1:3000/api/balancers/search?balancer=kodik&kp_id=12345&type=movie"
+```
+
+## 7) Настройка easy-mods.js в LAMPA
 
 В настройках плагина заполните:
 - `Easy-mods: Мой сервер` → `https://mods.example.com`
@@ -70,7 +100,7 @@ server {
 - `Easy-mods: Я VIP` → если нужен доступ к VIP-источникам
 - `Easy-mods: Вкл/выкл источники`
 
-## 6) Как получить Jackett API Key
+## 8) Как получить Jackett API Key
 
 1. Откройте Jackett Web UI.
 2. На Dashboard найдите поле API Key.

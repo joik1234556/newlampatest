@@ -49,22 +49,50 @@ server {
 }
 ```
 
-## 4) Подключение easy-mods.js в LAMPA
+## 4) Подключение плагинов в LAMPA (без ошибки 404)
 
-1. Загрузите `plugin/easy-mods.js` в GitHub-репозиторий.
-2. Включите GitHub Pages.
-3. Используйте **прямую ссылку на JS-файл**:
-   - GitHub Pages: `https://<username>.github.io/<repo>/easy-mods.js`
-   - или RAW: `https://raw.githubusercontent.com/<username>/<repo>/main/textkoro-mods/plugin/easy-mods.js`
+### Почему возникает 404?
 
-⚠️ Важно: ссылка вида `https://github.com/<user>/<repo>/.../easy-mods.js` (страница сайта GitHub) не подходит и в LAMPA даёт `404`.
+Когда вы добавляете в LAMPA URL вида `https://github.com/joik1234556/newlampatest/blob/main/textkoro-mods/plugin/balancer-mods.js` — это HTML-страница GitHub, а не JS-файл. LAMPA получает HTML вместо JavaScript и показывает ошибку.
 
-4. В LAMPA: Плагины → Добавить по ссылке → вставить прямой URL.
+Файлы плагинов находятся в папке **`docs/`** в корне репозитория специально для GitHub Pages:
+
+```
+docs/balancer-mods.js
+docs/easy-mods.js
+docs/koro-mods.js
+```
+
+### Шаг 1 — Включите GitHub Pages
+
+1. Откройте репозиторий `joik1234556/newlampatest` → **Settings** → **Pages**
+2. В поле **Source** выберите:
+   - Branch: `main`
+   - Folder: `/docs`
+3. Нажмите **Save**
+4. Подождите 1–2 минуты
+
+### Шаг 2 — Добавьте в LAMPA
+
+Используйте один из этих URL (оба работают без 404):
+
+**GitHub Pages (рекомендуется):**
+```
+https://joik1234556.github.io/newlampatest/balancer-mods.js
+https://joik1234556.github.io/newlampatest/easy-mods.js
+```
+
+**RAW GitHub (работает сразу, без включения Pages):**
+```
+https://raw.githubusercontent.com/joik1234556/newlampatest/main/docs/balancer-mods.js
+https://raw.githubusercontent.com/joik1234556/newlampatest/main/docs/easy-mods.js
+```
+
+В LAMPA: **Плагины → Добавить по ссылке** → вставить один из URL выше.
+
+⚠️ Не использовать URL вида `https://github.com/...blob.../balancer-mods.js` — это HTML-страница, даёт 404/ошибку в LAMPA.
 
 ## 5) Настройка balancer-mods.js в LAMPA
-
-1. Загрузите `plugin/balancer-mods.js` в GitHub-репозиторий и включите GitHub Pages (или используйте RAW URL).
-2. В LAMPA: Плагины → Добавить по ссылке → вставить прямой URL.
 3. В настройках плагина заполните:
    - `Balancer-Mods: Proxy URL` → `https://mods.example.com/api/balancers`
    - `Balancer-Mods: Filmix токен` → ваш Filmix-токен (опционально)

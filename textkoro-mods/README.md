@@ -72,7 +72,30 @@
 
 ## Подключение плагинов без 404
 
-Для LAMPA нужен **прямой URL на JS**, а не страница GitHub:
-- ✅ `https://<username>.github.io/<repo>/balancer-mods.js`
-- ✅ `https://raw.githubusercontent.com/<username>/<repo>/main/textkoro-mods/plugin/balancer-mods.js`
-- ❌ `https://github.com/<username>/<repo>/.../balancer-mods.js`
+### Почему возникает 404?
+
+GitHub Pages отдаёт только файлы из папки `docs/` (или корня) ветки, которая настроена в **Settings → Pages**. Если файл лежит глубоко (`textkoro-mods/plugin/`), он не будет найден по короткому URL.
+
+Файлы в папке `docs/` этого репозитория специально размещены для GitHub Pages:
+
+| Плагин | GitHub Pages URL (после включения Pages) |
+|--------|------------------------------------------|
+| balancer-mods | `https://joik1234556.github.io/newlampatest/balancer-mods.js` |
+| easy-mods | `https://joik1234556.github.io/newlampatest/easy-mods.js` |
+| koro-mods | `https://joik1234556.github.io/newlampatest/koro-mods.js` |
+
+### Как включить GitHub Pages
+
+1. Откройте **Settings** → **Pages** в репозитории `joik1234556/newlampatest`
+2. В поле **Source** выберите ветку `main` и папку `/docs`
+3. Нажмите **Save**
+4. Через 1–2 минуты файлы будут доступны по URL выше
+
+### Альтернативный URL (без GitHub Pages, всегда работает)
+
+```
+https://raw.githubusercontent.com/joik1234556/newlampatest/main/docs/balancer-mods.js
+https://raw.githubusercontent.com/joik1234556/newlampatest/main/docs/easy-mods.js
+```
+
+> ❌ Не использовать: `https://github.com/joik1234556/newlampatest/blob/main/docs/balancer-mods.js` — это HTML-страница, а не JS-файл.

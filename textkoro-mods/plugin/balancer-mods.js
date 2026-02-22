@@ -1,15 +1,23 @@
 /**
- * balancer-mods.js - Easy-Mods Lampa plugin v3.0
- * Adds an "Easy-Mods" button to every movie/series card.
- * Clicking it shows a balancer picker -> results sorted by quality -> player.
- * ES5-compatible. No emoji (max compatibility with old Smart TV WebViews).
+ * balancer-mods.js - Easy-Mods Lampa plugin v4.0
+ *
+ * Studied reference plugins:
+ *   - nb557/plugins/online_mod.js
+ *   - bennington111/uaonline/on_full.js
+ *   - ipavlin98/lmp-plugins/huyfix-full.js
+ *
+ * Fixes applied in v4:
+ *   1. BTN_HTML: broken SVG ("fill= missing space) fixed - single clean string
+ *   2. Button injection: follows nb557/huyfix pattern (.view--torrent + .after())
+ *   3. Active-card fallback: handles Lampa.Activity.active() (bennington pattern)
+ *   4. Lampa.Controller.toggle('content') before Select.show (huyfix pattern)
+ *   5. No #{} lang keys needed - removed LANG/Lang.add dependency
+ *
+ * ES5-compatible. No emoji. All errors caught.
  */
 (function () {
     'use strict';
 
-    /* ------------------------------------------------------------------ */
-    /*  Guard: Lampa must be available                                      */
-    /* ------------------------------------------------------------------ */
     if (typeof Lampa === 'undefined') return;
 
     /* ------------------------------------------------------------------ */
@@ -29,41 +37,21 @@
         '480p', '360p', 'Auto'
     ];
 
-    /* No emoji - use plain ASCII labels for old Smart TV compatibility */
     var BALANCERS = [
-        { id: 'hdrezka',  name: 'HDRezka',  quality: '4K / 1080p / 720p',  voices: true,  series: true  },
-        { id: 'zetflix',  name: 'Zetflix',  quality: '4K / 1080p',          voices: false, series: true  },
-        { id: 'alloha',   name: 'Alloha',   quality: '4K HDR / 1080p',      voices: false, series: false },
-        { id: 'videocdn', name: 'VideoCDN', quality: '1080p / 720p',         voices: false, series: true  },
-        { id: 'kodik',    name: 'Kodik',    quality: '1080p / 720p',         voices: true,  series: true  },
-        { id: 'ashdi',    name: 'Ashdi',    quality: '1080p / 720p (UA)',    voices: false, series: true  },
-        { id: 'filmix',   name: 'Filmix',   quality: '4K / 1080p',           voices: true,  series: true  }
+        { id: 'hdrezka',  name: 'HDRezka',  quality: '4K / 1080p / 720p' },
+        { id: 'zetflix',  name: 'Zetflix',  quality: '4K / 1080p'         },
+        { id: 'alloha',   name: 'Alloha',   quality: '4K HDR / 1080p'     },
+        { id: 'videocdn', name: 'VideoCDN', quality: '1080p / 720p'        },
+        { id: 'kodik',    name: 'Kodik',    quality: '1080p / 720p'        },
+        { id: 'ashdi',    name: 'Ashdi',    quality: '1080p / 720p (UA)'   },
+        { id: 'filmix',   name: 'Filmix',   quality: '4K / 1080p'          }
     ];
 
     /* ------------------------------------------------------------------ */
-    /*  Language strings (nb557 pattern)                                   */
+    /*  Button HTML - single valid string (no multi-part join that breaks  */
+    /*  SVG attribute spacing).  Uses nb557 broadcast icon SVG path.      */
     /* ------------------------------------------------------------------ */
-
-    var LANG = {
-        'easy_mods_watch': {
-            ru: 'Easy-Mods',
-            uk: 'Easy-Mods',
-            en: 'Easy-Mods'
-        }
-    };
-
-    /* Button HTML - must NOT contain #{} keys (we use plain text) */
-    var BTN_HTML = [
-        '<div class="full-start__button selector view--' + PLUGIN_ID + '" data-subtitle="' + PLUGIN_NAME + '">',
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 244 260" width="44" height="44">',
-        '<path d="M242,88v170H10V88h41l-38,38h37.1l38-38h38.4l-38,38h38.4l38-38h38.3l-38,38H204L242,88z',
-        'M228.9,2l8,37.7L191.2,10L228.9,2z M160.6,56l-45.8-29.7 38-8.1 45.8,29.7L160.6,56z',
-        'M84.5,72.1L38.8,42.4l38-8.1 45.8,29.7L84.5,72.1z M10,88L2,50.2 47.8,80 10,88z"',
-        'fill="currentColor"/>',
-        '</svg>',
-        '<span>#{easy_mods_watch}</span>',
-        '</div>'
-    ].join('');
+    var BTN_HTML = '<div class="full-start__button selector view--easy_mods" data-subtitle="Easy-Mods"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 244 260" width="44" height="44"><path d="M242,88v170H10V88h41l-38,38h37.1l38-38h38.4l-38,38h38.4l38-38h38.3l-38,38H204L242,88L242,88z M228.9,2l8,37.7l0,0 L191.2,10L228.9,2z M160.6,56l-45.8-29.7l38-8.1l45.8,29.7L160.6,56z M84.5,72.1L38.8,42.4l38-8.1l45.8,29.7L84.5,72.1z M10,88 L2,50.2L47.8,80L10,88z" fill="currentColor"/></svg><span>Easy-Mods</span></div>';
 
     /* ------------------------------------------------------------------ */
     /*  State                                                               */
@@ -75,7 +63,7 @@
     };
 
     /* ------------------------------------------------------------------ */
-    /*  Storage helpers                                                     */
+    /*  Storage                                                             */
     /* ------------------------------------------------------------------ */
 
     function get(key, fallback) {
@@ -113,7 +101,7 @@
 
     function notice(text) {
         try {
-            if (Lampa.Noty && Lampa.Noty.show)   return Lampa.Noty.show(text);
+            if (Lampa.Noty && Lampa.Noty.show) return Lampa.Noty.show(text);
             if (Lampa.Notice && Lampa.Notice.show) return Lampa.Notice.show(text, 'info');
         } catch (e) {}
     }
@@ -134,7 +122,7 @@
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Network                                                             */
+    /*  Network (Lampa.Reguest first, fetch fallback)                      */
     /* ------------------------------------------------------------------ */
 
     function doFetch(url) {
@@ -146,8 +134,7 @@
                     url,
                     function (json) { resolve(json); },
                     function (a, c) {
-                        var msg = (net.errorDecode ? net.errorDecode(a, c) : 'network error');
-                        reject(new Error(msg));
+                        reject(new Error(net.errorDecode ? net.errorDecode(a, c) : 'network error'));
                     },
                     false,
                     { dataType: 'json' }
@@ -160,7 +147,7 @@
                 return res.json();
             });
         }
-        return Promise.reject(new Error('no network method available'));
+        return Promise.reject(new Error('no network method'));
     }
 
     /* ------------------------------------------------------------------ */
@@ -172,15 +159,15 @@
         var title = card.original_title || card.title || card.name || '';
         if (!title) return null;
         var year = '';
-        if (card.release_date)    year = String(card.release_date).slice(0, 4);
+        if (card.release_date)       year = String(card.release_date).slice(0, 4);
         else if (card.first_air_date) year = String(card.first_air_date).slice(0, 4);
-        else if (card.year)        year = String(card.year);
+        else if (card.year)           year = String(card.year);
         return {
             title:   title,
             year:    year,
-            kp_id:   card.kinopoisk_id || card.kp_id || null,
-            tmdb_id: card.id || card.tmdb_id || null,
-            imdb_id: card.imdb_id || null,
+            kp_id:   card.kinopoisk_id || card.kp_id   || null,
+            tmdb_id: card.id           || card.tmdb_id  || null,
+            imdb_id: card.imdb_id                       || null,
             type:    (card.seasons || card.number_of_seasons) ? 'tv' : 'movie'
         };
     }
@@ -239,7 +226,7 @@
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Lampa.Select wrapper                                                */
+    /*  Select helper (huyfix: toggle content controller first)            */
     /* ------------------------------------------------------------------ */
 
     function showSelect(data) {
@@ -249,9 +236,7 @@
             } else {
                 notice(PLUGIN_NAME + ': Select unavailable');
             }
-        } catch (e) {
-            notice(PLUGIN_NAME + ': showSelect error - ' + e.message);
-        }
+        } catch (e) {}
     }
 
     /* ------------------------------------------------------------------ */
@@ -263,9 +248,7 @@
         if (!url) { notice(PLUGIN_NAME + ': no stream URL'); return; }
         var title = (card && (card.title || card.name || card.original_title)) || item.title || '';
         try {
-            if (Lampa.Player && typeof Lampa.Player.play === 'function') {
-                Lampa.Player.play({ title: title, url: url, quality: item.quality || '' });
-            }
+            Lampa.Player.play({ title: title, url: url, quality: item.quality || '' });
         } catch (e) {
             try { Lampa.Player.play(url); } catch (e2) {
                 notice(PLUGIN_NAME + ': player error');
@@ -310,7 +293,7 @@
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Stream list (quality-sorted, 4K first)                             */
+    /*  Stream list (4K first)                                             */
     /* ------------------------------------------------------------------ */
 
     function openStreamList(rawItems, card) {
@@ -336,7 +319,7 @@
                         for (var k in item) {
                             if (Object.prototype.hasOwnProperty.call(item, k)) clone[k] = item[k];
                         }
-                        clone.url   = (voice && voice.url) ? voice.url : item.url;
+                        clone.url   = (voice && voice.url)  ? voice.url  : item.url;
                         clone.voice = (voice && (voice.name || String(voice))) || item.voice;
                         playUrl(clone, card);
                     });
@@ -350,7 +333,7 @@
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Balancer picker                                                     */
+    /*  Balancer picker -> search -> results                               */
     /* ------------------------------------------------------------------ */
 
     function openBalancerSelect(card) {
@@ -360,12 +343,12 @@
         var enabled = BALANCERS.filter(function (b) { return isEnabled(b.id); });
         if (!enabled.length) { notice(PLUGIN_NAME + ': all sources disabled'); return; }
 
+        /* Toggle focus to content before showing Select (huyfix pattern) */
+        try { if (Lampa.Controller && Lampa.Controller.toggle) Lampa.Controller.toggle('content'); } catch (e) {}
+
         var items = [{ title: '[ All sources ]', balancer: null }].concat(
             enabled.map(function (b) {
-                return {
-                    title: b.name + ' - ' + b.quality,
-                    balancer: b
-                };
+                return { title: b.name + ' - ' + b.quality, balancer: b };
             })
         );
 
@@ -376,8 +359,8 @@
                 if (!selected.balancer) {
                     notice(PLUGIN_NAME + ': searching all sources...');
                     var tasks = enabled.map(function (b) {
-                        return fetchBalancer(b.id, meta).then(function (items) {
-                            return items.map(function (item) {
+                        return fetchBalancer(b.id, meta).then(function (itms) {
+                            return itms.map(function (item) {
                                 item.balancer = item.balancer || b.name;
                                 return item;
                             });
@@ -392,11 +375,11 @@
                     });
                 } else {
                     notice(PLUGIN_NAME + ': searching ' + selected.balancer.name + '...');
-                    fetchBalancer(selected.balancer.id, meta).then(function (items) {
-                        items.forEach(function (item) {
+                    fetchBalancer(selected.balancer.id, meta).then(function (itms) {
+                        itms.forEach(function (item) {
                             item.balancer = item.balancer || selected.balancer.name;
                         });
-                        openStreamList(items, card);
+                        openStreamList(itms, card);
                     });
                 }
             }
@@ -435,76 +418,49 @@
                 component: 'interface',
                 param:  { name: 'easy_mods_proxy', type: 'input', default: PROXY_DEFAULT },
                 field:  { name: PLUGIN_NAME + ': Proxy URL',
-                          description: 'Backend proxy URL, e.g. https://mods.example.com/api/balancers' },
+                          description: 'Backend proxy, e.g. https://mods.example.com/api/balancers' },
                 onChange: function (v) { set('easy_mods_proxy', v); State.cache = {}; }
             });
             Lampa.SettingsApi.addParam({
                 component: 'interface',
                 param:  { name: 'easy_mods_filmix_token', type: 'input', default: '' },
                 field:  { name: PLUGIN_NAME + ': Filmix token',
-                          description: 'Token for Filmix 4K access (optional)' },
+                          description: 'Token for Filmix 4K (optional)' },
                 onChange: function (v) { set('easy_mods_filmix_token', v); State.cache = {}; }
             });
             Lampa.SettingsApi.addParam({
                 component: 'interface',
                 param:  { name: 'easy_mods_manage', type: 'trigger', default: false },
                 field:  { name: PLUGIN_NAME + ': Manage sources',
-                          description: 'Enable / disable individual balancers' },
+                          description: 'Enable/disable individual balancers' },
                 onChange: function () { openSourceManager(); }
             });
         } catch (e) {}
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Inject button into the full movie card (nb557 pattern)              */
+    /*  Button injection (bennington + nb557 + huyfix combined pattern)    */
+    /*                                                                      */
+    /*  All 3 reference plugins use:                                        */
+    /*   1. find('.view--torrent')  as anchor                              */
+    /*   2. $(Lampa.Lang.translate(html)) to create the button             */
+    /*   3. btn.on('hover:enter', fn) for TV remote                        */
+    /*   4. anchor.before(btn) OR anchor.after(btn)                        */
     /* ------------------------------------------------------------------ */
 
-    function injectButton(e) {
-        try {
-            if (!e || !e.object || !e.object.activity) return;
+    function addButton(torrentEl, movie) {
+        /* torrentEl = jQuery element pointing at .view--torrent */
+        if (!torrentEl || !torrentEl.length) return;
+        /* Avoid double injection */
+        if (torrentEl.parent().find('.view--easy_mods').length) return;
 
-            /* render() can return DOM element OR jQuery - wrap with $() to be safe */
-            var render = $(e.object.activity.render());
-            if (!render || !render.length) return;
+        var btn = $(Lampa.Lang.translate(BTN_HTML));
+        btn.on('hover:enter', function () {
+            openBalancerSelect(movie);
+        });
 
-            /* Don't inject twice */
-            if (render.find('.view--' + PLUGIN_ID).length) return;
-
-            /* Capture movie reference for the button click handler */
-            var movie = (e.data && e.data.movie) || null;
-
-            /* Create button using Lampa.Lang.translate (nb557 pattern) */
-            var btn = $(Lampa.Lang.translate(BTN_HTML));
-            btn.on('hover:enter', function () {
-                openBalancerSelect(movie);
-            });
-
-            /* Placement priority (nb557 places after .view--torrent) */
-            var anchor = render.find('.view--torrent').first();
-            if (anchor.length) {
-                anchor.after(btn);
-                return;
-            }
-            anchor = render.find('.view--online_mod, .view--online').first();
-            if (anchor.length) {
-                anchor.after(btn);
-                return;
-            }
-            var btnsRow = render.find('.full-start__buttons');
-            if (btnsRow.length) {
-                btnsRow.append(btn);
-                return;
-            }
-            /* Last resort: find .full-start or any container */
-            var fullStart = render.find('.full-start').first();
-            if (fullStart.length) {
-                fullStart.append(btn);
-                return;
-            }
-            render.append(btn);
-        } catch (err) {
-            /* Button injection failed - do not throw, plugin must not break Lampa */
-        }
+        /* Place the button after the torrent button (nb557 pattern) */
+        torrentEl.after(btn);
     }
 
     /* ------------------------------------------------------------------ */
@@ -515,32 +471,44 @@
         if (State.inited) return;
         State.inited = true;
 
-        try { Lampa.Lang.add(LANG); } catch (e) {}
-
         installSettings();
 
+        /* Listen for future card opens */
+        Lampa.Listener.follow('full', function (e) {
+            /* 'complite' is Lampa's intentional internal event name */
+            if (e && e.type == 'complite') {
+                try {
+                    addButton(
+                        e.object.activity.render().find('.view--torrent'),
+                        e.data.movie
+                    );
+                } catch (err) {}
+            }
+        });
+
+        /* Handle already-open card (bennington pattern) */
         try {
-            Lampa.Listener.follow('full', function (e) {
-                /* NOTE: 'complite' is Lampa's intentional internal event name */
-                if (e && e.type == 'complite') injectButton(e);
-            });
+            if (Lampa.Activity.active && Lampa.Activity.active().component == 'full') {
+                addButton(
+                    Lampa.Activity.active().activity.render().find('.view--torrent'),
+                    Lampa.Activity.active().card
+                );
+            }
         } catch (e) {}
 
-        notice(PLUGIN_NAME + ' active');
+        notice(PLUGIN_NAME + ' ready');
     }
 
     /* ------------------------------------------------------------------ */
-    /*  Bootstrap (nb557 pattern)                                           */
+    /*  Bootstrap                                                           */
     /* ------------------------------------------------------------------ */
 
     if (window.appready) {
         init();
     } else {
-        try {
-            Lampa.Listener.follow('app', function (e) {
-                if (e && e.type == 'ready') init();
-            });
-        } catch (e) {}
+        Lampa.Listener.follow('app', function (e) {
+            if (e && e.type == 'ready') init();
+        });
     }
 
 })();

@@ -1,33 +1,44 @@
 /**
  * Easy-Mod — прямые стримы через TorBox для Lampa 3.1.6
- * Версия: 2.0
+ * Версия: 3.0
  * Backend: http://46.225.222.255:8000
- *
- * Новое в v2.0:
- *   - Мгновенный старт (без экрана ожидания) при cache hit в /stream/start
- *   - Адаптивный polling: первые 30s каждые 2s, потом каждые 5s
- *   - Улучшенный экран ошибки с кнопкой «Вернуться к вариантам»
- *   - Дедуп: повторный выбор того же варианта → тот же job_id
- *
- * Компоненты:
- *   easy_mod_variants  — список вариантов (язык, озвучка, качество)
- *   easy_mod_wait      — экран ожидания с adaptive polling /stream/status
  */
 (function () {
     'use strict';
 
-    console.log('[Easy-Mod] Plugin v2.0 loaded for Lampa 3.1.6');
+    // ── Dedup guard (must be the first thing inside the IIFE) ─────────
+    console.log('[Easy-Mod] loaded v3.0');
+    window.easy_mod_plugin = window.easy_mod_plugin || false;
+    if (window.easy_mod_plugin) {
+        console.log('[Easy-Mod] already loaded, skip');
+        return;
+    }
+    window.easy_mod_plugin = true;
 
     var API_URL = 'http://46.225.222.255:8000';
 
     // Adaptive polling thresholds (ms)
-    var POLL_FAST_UNTIL_MS  = 30000;   // first 30 s: fast polling
-    var POLL_FAST_INTERVAL  = 2000;    // 2 s
-    var POLL_SLOW_INTERVAL  = 5000;    // 5 s
+    var POLL_FAST_UNTIL_MS = 30000;   // first 30 s
+    var POLL_FAST_INTERVAL = 2000;    // 2 s
+    var POLL_SLOW_INTERVAL = 5000;    // 5 s
 
-    // ------------------------------------------------------------------
-    // HTTP helpers — Lampa.Request().silent() (correct for 3.1.6)
-    // ------------------------------------------------------------------
+    // ── Network factory — Lampa.Reguest (3.1.6) with fallback ────────
+    function makeRequest() {
+        try {
+            var Ctor = (typeof Lampa !== 'undefined' && Lampa.Reguest)
+                ? Lampa.Reguest
+                : (typeof Lampa !== 'undefined' && Lampa.Request)
+                    ? Lampa.Request
+                    : null;
+            if (!Ctor) { throw new Error('No network class'); }
+            return new Ctor();
+        } catch (e) {
+            console.log('[Easy-Mod] ERROR makeRequest:', e.message);
+            return null;
+        }
+    }
+
+    // ── Query-string builder ──────────────────────────────────────────
     function buildQs(params) {
         var parts = [];
         var key;
@@ -39,21 +50,23 @@
         return parts.length ? ('?' + parts.join('&')) : '';
     }
 
+    // ── HTTP helpers ──────────────────────────────────────────────────
     function apiGet(path, params, onSuccess, onError) {
         try {
             var url = API_URL + path + buildQs(params || {});
             console.log('[Easy-Mod] GET ' + url);
-            var req = new Lampa.Request();
+            var req = makeRequest();
+            if (!req) { if (onError) { onError('no network'); } return; }
             req.silent(url, function (data) {
                 try {
                     var json = (typeof data === 'string') ? JSON.parse(data) : data;
                     onSuccess(json);
                 } catch (e) {
-                    console.log('[Easy-Mod] ERROR parse:', e.message, 'url:', url);
+                    console.log('[Easy-Mod] ERROR parse GET:', e.message, url);
                     if (onError) { onError(e); }
                 }
             }, function (err) {
-                console.log('[Easy-Mod] ERROR network:', err, 'url:', url);
+                console.log('[Easy-Mod] ERROR network GET:', err, url);
                 if (onError) { onError(err); }
             });
         } catch (e) {
@@ -66,19 +79,20 @@
         try {
             var url = API_URL + path;
             console.log('[Easy-Mod] POST ' + url);
-            var req = new Lampa.Request();
-            req.timeout(15000);
-            req.headers({ 'Content-Type': 'application/json' });
+            var req = makeRequest();
+            if (!req) { if (onError) { onError('no network'); } return; }
+            try { if (typeof req.timeout === 'function') { req.timeout(15000); } } catch (e) { /* silent */ }
+            try { if (typeof req.headers === 'function') { req.headers({'Content-Type': 'application/json'}); } } catch (e) { /* silent */ }
             req.silent(url, function (data) {
                 try {
                     var json = (typeof data === 'string') ? JSON.parse(data) : data;
                     onSuccess(json);
                 } catch (e) {
-                    console.log('[Easy-Mod] ERROR post parse:', e.message);
+                    console.log('[Easy-Mod] ERROR parse POST:', e.message);
                     if (onError) { onError(e); }
                 }
             }, function (err) {
-                console.log('[Easy-Mod] ERROR post network:', err);
+                console.log('[Easy-Mod] ERROR network POST:', err);
                 if (onError) { onError(err); }
             }, JSON.stringify(body));
         } catch (e) {
@@ -87,31 +101,29 @@
         }
     }
 
-    // ------------------------------------------------------------------
-    // Player helper
-    // ------------------------------------------------------------------
+    // ── Player helper ─────────────────────────────────────────────────
     function playDirect(url, title, poster) {
         try {
-            console.log('[Easy-Mod] playing url:', url.substring(0, 80));
+            console.log('[Easy-Mod] play direct_url:', url.substring(0, 80));
             Lampa.Player.play({
                 title:     title  || 'Easy-Mod',
                 url:       url,
                 poster:    poster || '',
                 subtitles: []
             });
-            Lampa.Player.playlist([{ title: title || 'Easy-Mod', url: url }]);
+            Lampa.Player.playlist([{title: title || 'Easy-Mod', url: url}]);
         } catch (e) {
             console.log('[Easy-Mod] ERROR playDirect:', e.message);
-            try { Lampa.Noty.show('[Easy-Mod] \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043f\u043b\u0435\u0435\u0440'); } catch (e2) { /* silent */ }
+            try { Lampa.Noty.show('[Easy-Mod] Не удалось запустить плеер'); } catch (e2) { /* silent */ }
         }
     }
 
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     // Component 1: easy_mod_variants
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     function EasyModVariants(object) {
         this._object  = object || {};
-        this._movie   = (object && object.movie) ? object.movie : {};
+        this._movie   = (object && object.movie)  ? object.movie  : {};
         this._render  = $('<div class="easy-mod-variants">');
         this._destroy = false;
         console.log('[Easy-Mod] EasyModVariants init movie:', this._movie.title || '?');
@@ -123,10 +135,10 @@
 
     EasyModVariants.prototype.start = function () {
         try {
-            console.log('[Easy-Mod] easy_mod_variants.start()');
+            console.log('[Easy-Mod] easy_mod_variants start');
             this._loadVariants();
         } catch (e) {
-            console.log('[Easy-Mod] ERROR easy_mod_variants.start():', e.message);
+            console.log('[Easy-Mod] ERROR easy_mod_variants start:', e.message);
         }
     };
 
@@ -136,19 +148,21 @@
             self._render.html(
                 '<div class="easy-mod-loading">'
                 + '<div class="easy-mod-spinner"></div>'
-                + '<span>\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432\u2026</span>'
+                + '<span>Загрузка вариантов…</span>'
                 + '</div>'
             );
 
-            var params = { title: self._movie.title || '' };
-            if (self._movie.year) { params.year = self._movie.year; }
-            if (self._movie.id)   { params.tmdb_id = String(self._movie.id); }
+            var movie  = self._movie;
+            var query  = movie.title || movie.name || movie.original_title || movie.original_name || '';
+            var params = {title: query};
+            if (movie.year)             { params.year    = movie.year; }
+            if (movie.id)               { params.tmdb_id = String(movie.id); }
 
             apiGet('/variants', params, function (data) {
                 try {
                     if (self._destroy) { return; }
                     var variants = (data && Array.isArray(data.variants)) ? data.variants : [];
-                    console.log('[Easy-Mod] variants count:', variants.length);
+                    console.log('[Easy-Mod] variants loaded N=' + variants.length);
                     self._renderVariants(variants);
                 } catch (e) {
                     console.log('[Easy-Mod] ERROR _loadVariants handler:', e.message);
@@ -169,16 +183,11 @@
             self._render.empty();
 
             if (!variants.length) {
-                self._render.html(
-                    '<div class="easy-mod-empty">'
-                    + '\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b'
-                    + '</div>'
-                );
+                self._render.html('<div class="easy-mod-empty">Варианты не найдены</div>');
                 return;
             }
 
-            var title = $('<div class="easy-mod-title">')
-                .text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0432\u0430\u0440\u0438\u0430\u043d\u0442');
+            var title = $('<div class="easy-mod-title">').text('Выберите вариант');
             self._render.append(title);
 
             var list = $('<div class="easy-mod-list">');
@@ -187,28 +196,23 @@
             for (i = 0; i < variants.length; i++) {
                 (function (v) {
                     var row = $('<div class="easy-mod-item selector">').attr('data-id', v.id);
-
-                    var labelEl = $('<div class="easy-mod-item__label">').text(v.label || v.voice);
+                    var labelEl = $('<div class="easy-mod-item__label">').text(v.label || v.voice || '');
                     var meta    = $('<div class="easy-mod-item__meta">');
-
-                    var parts = [];
+                    var parts   = [];
                     if (v.quality)  { parts.push(v.quality); }
                     if (v.codec)    { parts.push(v.codec); }
                     if (v.size_mb)  { parts.push(Math.round(v.size_mb / 1024 * 10) / 10 + ' GB'); }
-                    if (v.seeders)  { parts.push('\u2191 ' + v.seeders); }
-                    meta.text(parts.join('  \u00b7  '));
-
+                    if (v.seeders)  { parts.push('↑ ' + v.seeders); }
+                    meta.text(parts.join('  ·  '));
                     row.append(labelEl).append(meta);
-
                     row.on('hover:enter click', function () {
                         try {
-                            console.log('[Easy-Mod] variant selected id:', v.id, 'label:', v.label);
+                            console.log('[Easy-Mod] variant selected id:', v.id, 'label:', (v.label || v.voice));
                             self._startStream(v);
                         } catch (e2) {
                             console.log('[Easy-Mod] ERROR variant click:', e2.message);
                         }
                     });
-
                     list.append(row);
                 })(variants[i]);
             }
@@ -219,7 +223,7 @@
                 Lampa.Controller.enable('content');
                 self._render.find('.selector').first().focus();
             } catch (e) {
-                console.log('[Easy-Mod] WARNING: controller focus:', e.message);
+                console.log('[Easy-Mod] WARNING controller focus:', e.message);
             }
         } catch (e) {
             console.log('[Easy-Mod] ERROR _renderVariants:', e.message);
@@ -235,9 +239,6 @@
                 title:      (self._movie.title || '') + ' [' + (variant.quality || '') + ']'
             };
 
-            console.log('[Easy-Mod] POST /stream/start variant_id:', variant.id);
-
-            // Show loading indicator on the button row
             try { self._render.find('[data-id="' + variant.id + '"]').addClass('easy-mod-item--loading'); } catch (e) { /* silent */ }
 
             apiPost('/stream/start', body, function (data) {
@@ -246,27 +247,26 @@
                     var status    = (data && data.status)     ? data.status     : '';
                     var directUrl = (data && data.direct_url) ? data.direct_url : '';
 
-                    console.log('[Easy-Mod] /stream/start → job_id:', jobId, 'status:', status);
+                    console.log('[Easy-Mod] start stream job_id=' + jobId + ' status=' + status);
 
                     if (!jobId) {
-                        try { Lampa.Noty.show('[Easy-Mod] \u041e\u0448\u0438\u0431\u043a\u0430: job_id \u043d\u0435 \u043f\u043e\u043b\u0443\u0447\u0435\u043d'); } catch (e) { /* silent */ }
+                        try { Lampa.Noty.show('[Easy-Mod] Ошибка: job_id не получен'); } catch (e) { /* silent */ }
                         return;
                     }
 
-                    // ── INSTANT PLAY: cache hit, no wait screen needed ──────────
+                    // Cache hit — instant play
                     if (status === 'ready' && directUrl) {
                         console.log('[Easy-Mod] cache hit — instant play');
-                        var playTitle = (self._movie.title || 'Easy-Mod')
-                            + (variant.quality ? ' [' + variant.quality + ']' : '');
-                        playDirect(directUrl, playTitle, self._movie.poster || '');
+                        var t = (self._movie.title || 'Easy-Mod') + (variant.quality ? ' [' + variant.quality + ']' : '');
+                        playDirect(directUrl, t, self._movie.poster || '');
                         return;
                     }
 
-                    // ── QUEUED: open wait screen with adaptive polling ───────────
+                    // Not ready — open wait screen
                     if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
                         Lampa.Activity.push({
                             component: 'easy_mod_wait',
-                            title:     'Easy-Mod \u2014 \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430',
+                            title:     'Easy-Mod — Подготовка',
                             movie:     self._movie,
                             job_id:    jobId,
                             variant:   variant
@@ -274,11 +274,11 @@
                     }
                 } catch (e) {
                     console.log('[Easy-Mod] ERROR _startStream handler:', e.message);
-                    try { Lampa.Noty.show('[Easy-Mod] \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u043f\u0443\u0441\u043a\u0430'); } catch (e2) { /* silent */ }
+                    try { Lampa.Noty.show('[Easy-Mod] Ошибка запуска'); } catch (e2) { /* silent */ }
                 }
             }, function (err) {
                 console.log('[Easy-Mod] ERROR /stream/start:', err);
-                try { Lampa.Noty.show('[Easy-Mod] \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0441\u0442\u0440\u0438\u043c: ' + String(err)); } catch (e) { /* silent */ }
+                try { Lampa.Noty.show('[Easy-Mod] Не удалось запустить стрим: ' + String(err)); } catch (e) { /* silent */ }
             });
         } catch (e) {
             console.log('[Easy-Mod] ERROR _startStream:', e.message);
@@ -287,11 +287,7 @@
 
     EasyModVariants.prototype._renderError = function (msg) {
         try {
-            this._render.html(
-                '<div class="easy-mod-error">'
-                + '\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438: ' + String(msg)
-                + '</div>'
-            );
+            this._render.html('<div class="easy-mod-error">Ошибка загрузки: ' + String(msg) + '</div>');
         } catch (e) {
             console.log('[Easy-Mod] ERROR _renderError:', e.message);
         }
@@ -309,19 +305,19 @@
         }
     };
 
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     // Component 2: easy_mod_wait  (adaptive polling)
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     function EasyModWait(object) {
-        this._object     = object || {};
-        this._movie      = (object && object.movie)   ? object.movie   : {};
-        this._jobId      = (object && object.job_id)  ? object.job_id  : '';
-        this._variant    = (object && object.variant) ? object.variant : {};
-        this._render     = $('<div class="easy-mod-wait">');
-        this._timer      = null;
-        this._destroy    = false;
-        this._played     = false;
-        this._startedAt  = Date.now();   // for adaptive polling
+        this._object    = object || {};
+        this._movie     = (object && object.movie)   ? object.movie   : {};
+        this._jobId     = (object && object.job_id)  ? object.job_id  : '';
+        this._variant   = (object && object.variant) ? object.variant : {};
+        this._render    = $('<div class="easy-mod-wait">');
+        this._timer     = null;
+        this._destroy   = false;
+        this._played    = false;
+        this._startedAt = Date.now();
         console.log('[Easy-Mod] EasyModWait init job_id:', this._jobId);
     }
 
@@ -331,30 +327,27 @@
 
     EasyModWait.prototype.start = function () {
         try {
-            console.log('[Easy-Mod] easy_mod_wait.start() job_id:', this._jobId);
-            this._showWaiting(0, '\u0417\u0430\u043f\u0440\u043e\u0441 \u043a TorBox\u2026');
+            console.log('[Easy-Mod] easy_mod_wait start job_id:', this._jobId);
+            this._showWaiting(0, 'Запрос к TorBox…');
             this._poll();
         } catch (e) {
-            console.log('[Easy-Mod] ERROR easy_mod_wait.start():', e.message);
+            console.log('[Easy-Mod] ERROR easy_mod_wait start:', e.message);
         }
     };
 
     EasyModWait.prototype._showWaiting = function (progress, statusText) {
         try {
             var pct = Math.round((progress || 0) * 100);
-            var st  = statusText || ('\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026 ' + pct + '%');
+            var st  = statusText || ('Подготовка потока… ' + pct + '%');
+            var self = this;
             this._render.html(
                 '<div class="easy-mod-wait__inner">'
                 + '<div class="easy-mod-spinner"></div>'
                 + '<div class="easy-mod-wait__title">' + st + '</div>'
-                + '<div class="easy-mod-wait__hint">'
-                + '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0447\u0435\u0440\u0435\u0437 TorBox. \u041f\u043e\u0434\u043e\u0436\u0434\u0438\u0442\u0435\u2026'
-                + '</div>'
-                + '<div class="easy-mod-wait__back selector">\u041d\u0430\u0437\u0430\u0434</div>'
+                + '<div class="easy-mod-wait__hint">Загрузка через TorBox. Подождите…</div>'
+                + '<div class="easy-mod-wait__back selector">Назад</div>'
                 + '</div>'
             );
-
-            var self = this;
             this._render.find('.easy-mod-wait__back').on('hover:enter click', function () {
                 try {
                     self._stopPolling();
@@ -380,17 +373,17 @@
         try {
             if (self._destroy || self._played) { return; }
 
-            apiGet('/stream/status', { job_id: self._jobId }, function (data) {
+            apiGet('/stream/status', {job_id: self._jobId}, function (data) {
                 try {
                     if (self._destroy || self._played) { return; }
 
-                    var state    = (data && data.state)      ? data.state      : 'unknown';
-                    var progress = (data && data.progress != null) ? data.progress : 0;
-                    var url      = (data && data.direct_url) ? data.direct_url  : '';
-                    var message  = (data && data.message)    ? data.message     : '';
+                    var state     = (data && data.state)          ? data.state      : 'unknown';
+                    var progress  = (data && data.progress != null) ? data.progress  : 0;
+                    var url       = (data && data.direct_url)     ? data.direct_url : '';
+                    var message   = (data && data.message)        ? data.message    : '';
+                    var elapsed   = Math.round((Date.now() - self._startedAt) / 1000);
 
-                    console.log('[Easy-Mod] poll state:', state, 'progress:', progress,
-                                'elapsed:', Math.round((Date.now() - self._startedAt) / 1000) + 's');
+                    console.log('[Easy-Mod] status state=' + state + ' progress=' + progress + ' elapsed=' + elapsed + 's');
 
                     if (state === 'ready' && url) {
                         self._played = true;
@@ -403,17 +396,13 @@
 
                     if (state === 'failed') {
                         self._stopPolling();
-                        self._showError(message || '\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u043f\u043e\u0442\u043e\u043a\u0430 \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c');
+                        self._showError(message || 'Создание потока не удалось');
                         return;
                     }
 
-                    var statusText = '\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026 '
-                        + Math.round(progress * 100) + '%';
-                    if (state === 'queued')    { statusText = '\u0412 \u043e\u0447\u0435\u0440\u0435\u0434\u0438\u2026'; }
-                    if (state === 'preparing') {
-                        statusText = '\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026 '
-                            + Math.round(progress * 100) + '%';
-                    }
+                    var statusText = 'Подготовка потока… ' + Math.round(progress * 100) + '%';
+                    if (state === 'queued')    { statusText = 'В очереди…'; }
+                    if (state === 'preparing') { statusText = 'Подготовка потока… ' + Math.round(progress * 100) + '%'; }
 
                     self._showWaiting(progress, statusText);
 
@@ -448,10 +437,8 @@
         try {
             this._render.html(
                 '<div class="easy-mod-wait__inner">'
-                + '<div class="easy-mod-error">\u041e\u0448\u0438\u0431\u043a\u0430: ' + String(msg) + '</div>'
-                + '<div class="easy-mod-wait__back selector">'
-                + '\u0412\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u043a \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u043c'
-                + '</div>'
+                + '<div class="easy-mod-error">Ошибка: ' + String(msg) + '</div>'
+                + '<div class="easy-mod-wait__back selector">Вернуться к вариантам</div>'
                 + '</div>'
             );
             this._render.find('.easy-mod-wait__back').on('hover:enter click', function () {
@@ -488,18 +475,16 @@
         }
     };
 
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     // Register Lampa components
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     function registerComponents() {
         try {
             console.log('[Easy-Mod] registerComponents()');
-
             if (typeof Lampa === 'undefined' || !Lampa.Component) {
                 console.log('[Easy-Mod] ERROR: Lampa.Component not available');
                 return;
             }
-
             if (typeof Lampa.Component.add === 'function') {
                 Lampa.Component.add('easy_mod_variants', EasyModVariants);
                 Lampa.Component.add('easy_mod_wait',     EasyModWait);
@@ -516,9 +501,88 @@
         }
     }
 
-    // ------------------------------------------------------------------
-    // Inject «Easy-Mod» button on film detail page
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
+    // Button injection — setInterval strategy, max 50 tries (~15 s)
+    // ─────────────────────────────────────────────────────────────────
+    function injectButton(movie) {
+        try {
+            var tries      = 0;
+            var maxTries   = 50;
+
+            var interval = setInterval(function () {
+                try {
+                    tries++;
+                    if (tries > maxTries) {
+                        clearInterval(interval);
+                        console.log('[Easy-Mod] gave up waiting for anchor after ' + maxTries + ' tries');
+                        return;
+                    }
+
+                    // ── Find the anchor to insert AFTER ────────────
+                    var anchor = null;
+
+                    // Primary: the TorBox-style button already on page
+                    var torrentAnchor = $('.view--torrent');
+                    if (torrentAnchor.length) {
+                        anchor = torrentAnchor.first();
+                    }
+
+                    // Fallback: first button in the buttons bar
+                    if (!anchor || !anchor.length) {
+                        var firstBtn = $('.full-start__buttons .full-start__button:first-child');
+                        if (firstBtn.length) { anchor = firstBtn; }
+                    }
+
+                    if (!anchor || !anchor.length) { return; } // not ready yet
+
+                    // Already injected?
+                    if ($('.easy-mod-btn').length) {
+                        clearInterval(interval);
+                        return;
+                    }
+
+                    clearInterval(interval);
+
+                    // ── Build the button ───────────────────────────
+                    var btn = $('<div>')
+                        .addClass('full-start__button selector easy-mod-btn')
+                        .append(
+                            $('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" '
+                              + 'viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                              + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">')
+                                .html('<polygon points="5 3 19 12 5 21 5 3"/>')
+                        )
+                        .append($('<span>').text('Easy-Mod'));
+
+                    btn.on('hover:enter click', function () {
+                        try {
+                            console.log('[Easy-Mod] open variants for:', (movie && movie.title) || '?');
+                            if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
+                                Lampa.Activity.push({
+                                    component: 'easy_mod_variants',
+                                    title:     'Easy-Mod',
+                                    movie:     movie
+                                });
+                            }
+                        } catch (e) {
+                            console.log('[Easy-Mod] ERROR button handler:', e.message);
+                        }
+                    });
+
+                    anchor.after(btn);
+                    console.log('[Easy-Mod] button injected for:', (movie && movie.title) || '?');
+                } catch (e) {
+                    console.log('[Easy-Mod] ERROR injectButton interval:', e.message);
+                }
+            }, 300);
+        } catch (e) {
+            console.log('[Easy-Mod] ERROR injectButton():', e.message);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Hook into film detail page via Lampa.Listener 'full'
+    // ─────────────────────────────────────────────────────────────────
     function hookFilmPage() {
         try {
             if (!Lampa.Listener || typeof Lampa.Listener.follow !== 'function') {
@@ -528,28 +592,27 @@
 
             Lampa.Listener.follow('full', function (e) {
                 try {
-                    var component = (e && e.object) ? e.object : e;
-                    var movie = null;
+                    // Only act on the 'complite' sub-event (Lampa 3.1.6 spelling)
+                    if (e && e.type && e.type !== 'complite') { return; }
 
-                    if (component && component.movie)     { movie = component.movie; }
-                    else if (component && component.card) { movie = component.card; }
-                    else if (component && component.data) { movie = component.data; }
-                    else if (e && e.data && e.data.movie) { movie = e.data.movie; }
+                    console.log('[Easy-Mod] full complite');
+
+                    // Resolve the movie object from various event shapes
+                    var movie = null;
+                    if (e && e.data && e.data.movie)         { movie = e.data.movie; }
+                    else if (e && e.object && e.object.movie) { movie = e.object.movie; }
+                    else if (e && e.object && e.object.card)  { movie = e.object.card; }
+                    else if (e && e.object && e.object.data)  { movie = e.object.data; }
+                    else if (e && e.movie)                    { movie = e.movie; }
+                    else if (e && e.card)                     { movie = e.card; }
 
                     if (!movie) {
-                        console.log('[Easy-Mod] full event: cannot resolve movie');
+                        console.log('[Easy-Mod] full complite: cannot resolve movie');
                         return;
                     }
 
-                    console.log('[Easy-Mod] full event for:', movie.title);
-
-                    setTimeout(function () {
-                        try {
-                            injectButton(component, movie);
-                        } catch (err) {
-                            console.log('[Easy-Mod] ERROR delayed injectButton:', err.message);
-                        }
-                    }, 300);
+                    console.log('[Easy-Mod] full complite movie:', movie.title || movie.name || '?');
+                    injectButton(movie);
                 } catch (err) {
                     console.log('[Easy-Mod] ERROR full handler:', err.message);
                 }
@@ -561,68 +624,9 @@
         }
     }
 
-    function injectButton(component, movie) {
-        try {
-            var render;
-            if (component && component.activity && typeof component.activity.render === 'function') {
-                render = component.activity.render();
-            } else if (component && typeof component.render === 'function') {
-                render = component.render();
-            } else if (component && component.$el) {
-                render = component.$el;
-            }
-
-            if (!render || !render.length) {
-                console.log('[Easy-Mod] injectButton: no render');
-                return;
-            }
-
-            var container = render.find('.full-start__buttons');
-            if (!container.length) { container = render.find('.full-start'); }
-            if (!container.length) { container = render.find('.view--start'); }
-
-            if (!container.length) {
-                console.log('[Easy-Mod] injectButton: buttons container not found');
-                return;
-            }
-
-            if (container.find('.easy-mod-btn').length) { return; }  // already injected
-
-            var btn = $('<div>')
-                .addClass('full-start__button selector easy-mod-btn')
-                .append(
-                    $('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" '
-                      + 'viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-                      + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">')
-                        .html('<polygon points="5 3 19 12 5 21 5 3"/>')
-                )
-                .append($('<span>').text('Easy-Mod'));
-
-            btn.on('hover:enter click', function () {
-                try {
-                    console.log('[Easy-Mod] button pressed for:', movie.title);
-                    if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
-                        Lampa.Activity.push({
-                            component: 'easy_mod_variants',
-                            title:     'Easy-Mod',
-                            movie:     movie
-                        });
-                    }
-                } catch (e) {
-                    console.log('[Easy-Mod] ERROR button handler:', e.message);
-                }
-            });
-
-            container.append(btn);
-            console.log('[Easy-Mod] button injected for:', movie.title);
-        } catch (e) {
-            console.log('[Easy-Mod] ERROR injectButton():', e.message);
-        }
-    }
-
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     // Initialise
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     function init() {
         try {
             console.log('[Easy-Mod] init()');
@@ -634,9 +638,9 @@
         }
     }
 
-    // ------------------------------------------------------------------
-    // Boot — wait for Lampa, hook ready event
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
+    // Boot — wait for Lampa global
+    // ─────────────────────────────────────────────────────────────────
     function boot() {
         try {
             if (typeof Lampa === 'undefined') {
@@ -650,7 +654,7 @@
             if (Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
                 Lampa.Listener.follow('ready', function () {
                     try {
-                        console.log('[Easy-Mod] Lampa "ready" received');
+                        console.log('[Easy-Mod] Lampa ready received');
                         init();
                     } catch (e) {
                         console.log('[Easy-Mod] ERROR ready handler:', e.message);
@@ -667,9 +671,9 @@
         }
     }
 
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     // Entry point
-    // ------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────
     try {
         if (typeof document !== 'undefined' && document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', boot);

@@ -1,23 +1,23 @@
 /**
- * KoroT — Kinogo + Rezka + TorBox
- * Lampa plugin v1.0
- * Source ID: koroT
- * Backend: http://46.225.222.255:8000
+ * KoroT — Kinogo + Rezka + Easy Mod (TorBox)
+ * Lampa plugin v1.0 — written for Lampa 3.1.6
+ * Source ID : koroT
+ * Backend   : http://46.225.222.255:8000
  */
 (function () {
     'use strict';
 
-    console.log('[KoroT] Plugin loaded v1.0');
+    console.log('[KoroT] Plugin v1.0 loaded for Lampa 3.1.6');
 
     var api_url = 'http://46.225.222.255:8000';
 
     // ------------------------------------------------------------------
-    // Manifest
+    // Manifest (displayed in Lampa plugin manager)
     // ------------------------------------------------------------------
     var MANIFEST = {
         type: 'plugin',
-        name: 'KoroT \u2014 Kinogo + Rezka + TorBox',
-        description: '\u041f\u043e\u0438\u0441\u043a \u0447\u0435\u0440\u0435\u0437 Kinogo, Rezka \u0438 TorBox',
+        name: 'KoroT \u2014 Kinogo + Rezka + Easy Mod (TorBox)',
+        description: '\u041f\u043e\u0438\u0441\u043a \u0447\u0435\u0440\u0435\u0437 Kinogo, Rezka \u0438 TorBox Easy Mod',
         version: '1.0',
         author: 'KoroT',
         homepage: api_url,
@@ -25,253 +25,267 @@
     };
 
     // ------------------------------------------------------------------
-    // Helper: safe HTTP GET via Lampa.Request
+    // HTTP helper using Lampa.Request().silent() — correct for 3.1.6
     // ------------------------------------------------------------------
+    function buildQs(params) {
+        var parts = [];
+        var key;
+        for (key in params) {
+            if (Object.prototype.hasOwnProperty.call(params, key)) {
+                parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+            }
+        }
+        return parts.length ? ('?' + parts.join('&')) : '';
+    }
+
     function apiGet(path, params, onSuccess, onError) {
         try {
-            var qs = '';
-            if (params) {
-                var parts = [];
-                for (var key in params) {
-                    if (Object.prototype.hasOwnProperty.call(params, key)) {
-                        parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
-                    }
-                }
-                if (parts.length) {
-                    qs = '?' + parts.join('&');
-                }
-            }
-
-            var url = api_url + path + qs;
-            console.log('[KoroT] apiGet:', url);
+            var url = api_url + path + buildQs(params || {});
+            console.log('[KoroT] apiGet ->', url);
 
             var req = new Lampa.Request();
-            req.timeout(15000);
 
-            req.native(url, function (data) {
+            // silent() — suppresses Lampa's global loading spinner (3.1.6 pattern)
+            req.silent(url, function (data) {
                 try {
                     var json = (typeof data === 'string') ? JSON.parse(data) : data;
-                    console.log('[KoroT] apiGet success:', url);
+                    console.log('[KoroT] apiGet OK:', url);
                     onSuccess(json);
                 } catch (e) {
-                    console.log('[KoroT] apiGet parse error:', e.message, 'url:', url);
-                    if (onError) onError(e);
+                    console.log('[KoroT] ERROR: apiGet parse error:', e.message, '| url:', url);
+                    if (onError) { onError(e); }
                 }
             }, function (err) {
-                console.log('[KoroT] apiGet network error:', err, 'url:', url);
-                if (onError) onError(err);
+                console.log('[KoroT] ERROR: apiGet network error:', err, '| url:', url);
+                if (onError) { onError(err); }
             });
         } catch (e) {
-            console.log('[KoroT] apiGet exception:', e.message);
-            if (onError) onError(e);
+            console.log('[KoroT] ERROR: apiGet exception:', e.message);
+            if (onError) { onError(e); }
         }
     }
 
     // ------------------------------------------------------------------
-    // Source component
+    // Source constructor  (called by Lampa.Source.register)
     // ------------------------------------------------------------------
-    function KoroTSource() {
-        var self = this;
-        this._data = {};
+    function Source(object) {
+        console.log('[KoroT] Source constructor called');
+        // `object` is the activity/params object passed by Lampa
+        this._object = object || {};
     }
 
     /**
-     * search(params, resolve, reject)
-     * params.query — search string
+     * search(params, callback)
+     * params.query — the string the user typed
+     * callback(results)  — results is an array of card objects
      */
-    KoroTSource.prototype.search = function (params, resolve, reject) {
+    Source.prototype.search = function (params, callback) {
         try {
-            var query = (params && params.query) ? params.query : '';
-            console.log('[KoroT] search:', query);
+            var query = (params && params.query) ? String(params.query) : '';
+            console.log('[KoroT] search() query:', query);
 
             if (!query) {
-                resolve([]);
+                console.log('[KoroT] search() empty query — returning []');
+                if (callback) { callback([]); }
                 return;
             }
 
             apiGet('/search', { q: query }, function (data) {
                 try {
-                    var list = [];
-
                     // Backend returns { results: [...] } OR plain array
-                    var raw = (data && data.results) ? data.results : (Array.isArray(data) ? data : []);
+                    var raw = [];
+                    if (data && Array.isArray(data.results)) {
+                        raw = data.results;
+                    } else if (Array.isArray(data)) {
+                        raw = data;
+                    }
 
-                    for (var i = 0; i < raw.length; i++) {
-                        var item = raw[i];
+                    var list = [];
+                    var i, item;
+                    for (i = 0; i < raw.length; i++) {
+                        item = raw[i];
                         list.push({
-                            id: 'koroT_' + i,
-                            title: item.title || '',
-                            original_title: item.title || '',
-                            year: item.year || '',
-                            poster: item.poster || '',
-                            poster_small: item.poster || '',
-                            background_image: item.poster || '',
-                            type: 'movie',
-                            source: 'koroT',
-                            // Store extra data for /get call
-                            korot_url: item.url || '',
-                            korot_source: item.source || ''
+                            id:               'koroT_' + i,
+                            title:            item.title            || '',
+                            original_title:   item.title            || '',
+                            year:             item.year             || '',
+                            poster:           item.poster           || '',
+                            poster_small:     item.poster           || '',
+                            background_image: item.poster           || '',
+                            type:             'movie',
+                            source:           'koroT',
+                            // extra fields consumed by Source.prototype.full()
+                            korot_url:        item.url              || '',
+                            korot_source:     item.source           || ''
                         });
                     }
 
-                    console.log('[KoroT] search results:', list.length);
-                    resolve(list);
+                    console.log('[KoroT] search() results count:', list.length);
+                    if (callback) { callback(list); }
                 } catch (e) {
-                    console.log('[KoroT] search parse error:', e.message);
-                    resolve([]);
+                    console.log('[KoroT] ERROR: search() result parse:', e.message);
+                    if (callback) { callback([]); }
                 }
             }, function (err) {
-                console.log('[KoroT] search failed:', err);
-                resolve([]);
+                console.log('[KoroT] ERROR: search() request failed:', err);
+                if (callback) { callback([]); }
             });
         } catch (e) {
-            console.log('[KoroT] search exception:', e.message);
-            resolve([]);
+            console.log('[KoroT] ERROR: search() exception:', e.message);
+            if (callback) { callback([]); }
         }
     };
 
     /**
-     * full(item, resolve, reject)
-     * Fetch detail + files for a selected card
+     * full(item, callback)
+     * item — the card object selected by the user (contains korot_url, korot_source)
+     * callback({ movie, torrents, episodes })
      */
-    KoroTSource.prototype.full = function (item, resolve, reject) {
+    Source.prototype.full = function (item, callback) {
         try {
-            var korot_url = item.korot_url || '';
-            var korot_source = item.korot_source || '';
+            var korot_url    = (item && item.korot_url)    ? item.korot_url    : '';
+            var korot_source = (item && item.korot_source) ? item.korot_source : '';
 
-            console.log('[KoroT] full:', korot_url, 'source:', korot_source);
+            console.log('[KoroT] full() url:', korot_url, '| source:', korot_source);
 
             if (!korot_url) {
-                console.log('[KoroT] full: no korot_url, aborting');
-                resolve({ movie: item, torrents: [], episodes: {} });
+                console.log('[KoroT] full() — no korot_url, returning empty');
+                if (callback) { callback({ movie: item, torrents: [], episodes: {} }); }
                 return;
             }
 
             apiGet('/get', { url: korot_url, source: korot_source }, function (data) {
                 try {
-                    var files = (data && data.files) ? data.files : [];
-
-                    // Build Lampa-compatible torrent/stream list
+                    var files   = (data && Array.isArray(data.files)) ? data.files : [];
                     var streams = [];
-                    for (var i = 0; i < files.length; i++) {
-                        var f = files[i];
-                        var entry = {
-                            title: (f.title || ('File ' + (i + 1))) + (f.quality ? ' [' + f.quality + ']' : ''),
-                            quality: f.quality || 'unknown',
-                            url: f.url || '',
-                            magnet: f.magnet || ''
-                        };
+                    var i, f, entry;
 
-                        // Prefer direct URL; fall back to magnet
+                    for (i = 0; i < files.length; i++) {
+                        f = files[i];
+                        entry = {
+                            title:   (f.title || ('File ' + (i + 1))) + (f.quality ? ' [' + f.quality + ']' : ''),
+                            quality: f.quality  || 'unknown',
+                            url:     f.url      || '',
+                            magnet:  f.magnet   || ''
+                        };
+                        // prefer direct URL, fall back to magnet
                         if (!entry.url && entry.magnet) {
                             entry.url = entry.magnet;
                         }
-
                         if (entry.url) {
                             streams.push(entry);
                         }
                     }
 
-                    // Merge metadata into item
-                    var movie = Lampa.Utils.extend({}, item);
-                    if (data.title) movie.title = data.title;
-                    if (data.poster) { movie.poster = data.poster; movie.poster_small = data.poster; }
-                    if (data.description) movie.overview = data.description;
-                    if (data.orig_title) movie.original_title = data.orig_title;
+                    // merge fresh metadata back into the card
+                    var movie = {};
+                    var k;
+                    for (k in item) {
+                        if (Object.prototype.hasOwnProperty.call(item, k)) {
+                            movie[k] = item[k];
+                        }
+                    }
+                    if (data.title)       { movie.title            = data.title; }
+                    if (data.poster)      { movie.poster = movie.poster_small = data.poster; }
+                    if (data.description) { movie.overview         = data.description; }
+                    if (data.orig_title)  { movie.original_title   = data.orig_title; }
 
-                    console.log('[KoroT] full streams:', streams.length);
-                    resolve({ movie: movie, torrents: streams, episodes: {} });
+                    console.log('[KoroT] full() streams:', streams.length);
+                    if (callback) { callback({ movie: movie, torrents: streams, episodes: {} }); }
                 } catch (e) {
-                    console.log('[KoroT] full parse error:', e.message);
-                    resolve({ movie: item, torrents: [], episodes: {} });
+                    console.log('[KoroT] ERROR: full() parse:', e.message);
+                    if (callback) { callback({ movie: item, torrents: [], episodes: {} }); }
                 }
             }, function (err) {
-                console.log('[KoroT] full request failed:', err);
-                resolve({ movie: item, torrents: [], episodes: {} });
+                console.log('[KoroT] ERROR: full() request failed:', err);
+                if (callback) { callback({ movie: item, torrents: [], episodes: {} }); }
             });
         } catch (e) {
-            console.log('[KoroT] full exception:', e.message);
-            resolve({ movie: item, torrents: [], episodes: {} });
+            console.log('[KoroT] ERROR: full() exception:', e.message);
+            if (callback) { callback({ movie: item, torrents: [], episodes: {} }); }
         }
     };
 
     /**
-     * list(params, resolve, reject)
-     * Called when opening the source directly (menu button).
-     * We re-use search with an empty query trigger, or show a prompt.
+     * list(params, callback)
+     * Called when the source panel is opened without a search query.
      */
-    KoroTSource.prototype.list = function (params, resolve, reject) {
+    Source.prototype.list = function (params, callback) {
         try {
-            console.log('[KoroT] list called');
-            // Return empty — the source will show "search" interface
-            resolve([]);
+            console.log('[KoroT] list() called');
+            if (callback) { callback([]); }
         } catch (e) {
-            console.log('[KoroT] list exception:', e.message);
-            resolve([]);
+            console.log('[KoroT] ERROR: list() exception:', e.message);
+            if (callback) { callback([]); }
         }
     };
 
-    /**
-     * clear()  — clean up when source is unloaded
-     */
-    KoroTSource.prototype.clear = function () {
+    /** destroy() — clean up when source is unloaded */
+    Source.prototype.destroy = function () {
         try {
-            console.log('[KoroT] clear');
+            console.log('[KoroT] destroy()');
         } catch (e) {
-            console.log('[KoroT] clear exception:', e.message);
+            console.log('[KoroT] ERROR: destroy() exception:', e.message);
         }
     };
 
     // ------------------------------------------------------------------
-    // Register source
+    // Register source with Lampa 3.1.6
     // ------------------------------------------------------------------
     function registerSource() {
         try {
+            console.log('[KoroT] registerSource() start');
+
             if (typeof Lampa === 'undefined') {
-                console.log('[KoroT] Lampa not found, aborting source registration');
+                console.log('[KoroT] ERROR: Lampa not defined, cannot register source');
                 return;
             }
 
-            var source = new KoroTSource();
-
-            // Lampa source descriptor
-            var descriptor = {
-                name: 'KoroT',
-                short_name: 'KoroT',
-                source: 'koroT',
-                icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
-                    + '<text y="18" font-size="16">&#x1F525;</text></svg>',
-                search: function (params, resolve, reject) {
-                    source.search(params, resolve, reject);
-                },
-                full: function (item, resolve, reject) {
-                    source.full(item, resolve, reject);
-                },
-                list: function (params, resolve, reject) {
-                    source.list(params, resolve, reject);
-                },
-                clear: function () {
-                    source.clear();
-                }
-            };
-
-            if (Lampa.Source && typeof Lampa.Source.add === 'function') {
-                Lampa.Source.add('koroT', descriptor);
-                console.log('[KoroT] Source registered via Lampa.Source.add');
-            } else if (Lampa.Torrents && typeof Lampa.Torrents.add === 'function') {
-                Lampa.Torrents.add(descriptor);
-                console.log('[KoroT] Source registered via Lampa.Torrents.add (fallback)');
-            } else {
-                console.log('[KoroT] WARNING: Could not find Source.add or Torrents.add — trying Component.add');
-                // Last-resort: register as a component-style source
-                try {
-                    Lampa.Component.add('koroT', descriptor);
-                } catch (ce) {
-                    console.log('[KoroT] Component.add failed:', ce.message);
-                }
+            // ---- PRIMARY: Lampa 3.1.6 API ----
+            if (Lampa.Source && typeof Lampa.Source.register === 'function') {
+                Lampa.Source.register('koroT', Source);
+                console.log('[KoroT] Source registered via Lampa.Source.register()');
+                return;
             }
+
+            // ---- FALLBACK: Lampa.Source.add (older builds) ----
+            if (Lampa.Source && typeof Lampa.Source.add === 'function') {
+                var inst = new Source({});
+                Lampa.Source.add('koroT', {
+                    name:       'KoroT',
+                    short_name: 'KoroT',
+                    source:     'koroT',
+                    search: function (params, resolve, reject) {
+                        inst.search(params, function (res) {
+                            if (resolve) { resolve(res); }
+                        });
+                    },
+                    full: function (item, resolve, reject) {
+                        inst.full(item, function (res) {
+                            if (resolve) { resolve(res); }
+                        });
+                    },
+                    list: function (params, resolve, reject) {
+                        inst.list(params, function (res) {
+                            if (resolve) { resolve(res); }
+                        });
+                    },
+                    clear: function () { inst.destroy(); }
+                });
+                console.log('[KoroT] Source registered via Lampa.Source.add() (fallback)');
+                return;
+            }
+
+            // ---- LAST RESORT: Lampa.Torrents.add ----
+            if (Lampa.Torrents && typeof Lampa.Torrents.add === 'function') {
+                Lampa.Torrents.add({ name: 'KoroT', source: 'koroT' });
+                console.log('[KoroT] Source registered via Lampa.Torrents.add() (last resort)');
+                return;
+            }
+
+            console.log('[KoroT] ERROR: No suitable Source registration API found');
         } catch (e) {
-            console.log('[KoroT] registerSource exception:', e.message);
+            console.log('[KoroT] ERROR: registerSource() exception:', e.message);
         }
     }
 
@@ -280,126 +294,163 @@
     // ------------------------------------------------------------------
     function addMenuButton() {
         try {
-            if (typeof Lampa === 'undefined' || !Lampa.Menu) {
-                console.log('[KoroT] Lampa.Menu not available, skipping menu button');
+            console.log('[KoroT] addMenuButton() start');
+
+            if (typeof Lampa === 'undefined') {
+                console.log('[KoroT] ERROR: Lampa not defined, skipping menu button');
                 return;
             }
 
-            var btn = {
-                title: 'KoroT',
-                subtitle: 'Kinogo + Rezka + TorBox',
-                icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">'
-                    + '<text y="18" font-size="16">&#x1F525;</text></svg>',
-                action: function () {
-                    try {
-                        console.log('[KoroT] Menu button clicked — opening search');
-                        openKoroTSearch();
-                    } catch (e) {
-                        console.log('[KoroT] menu action exception:', e.message);
+            // Lampa 3.1.6 — Lampa.Menu.add(item)
+            if (Lampa.Menu && typeof Lampa.Menu.add === 'function') {
+                Lampa.Menu.add({
+                    title:    'KoroT',
+                    subtitle: 'Kinogo + Rezka + TorBox',
+                    icon:     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+                              + '<text y="18" font-size="16">&#x1F525;</text></svg>',
+                    action: function () {
+                        try {
+                            console.log('[KoroT] Menu button pressed — opening search');
+                            openKoroTSearch();
+                        } catch (e) {
+                            console.log('[KoroT] ERROR: menu action exception:', e.message);
+                        }
                     }
-                }
-            };
-
-            if (typeof Lampa.Menu.add === 'function') {
-                Lampa.Menu.add(btn);
-                console.log('[KoroT] Menu button added via Lampa.Menu.add');
-            } else {
-                console.log('[KoroT] Lampa.Menu.add not available');
-            }
-        } catch (e) {
-            console.log('[KoroT] addMenuButton exception:', e.message);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Open KoroT search
-    // ------------------------------------------------------------------
-    function openKoroTSearch() {
-        try {
-            console.log('[KoroT] openKoroTSearch');
-
-            // Use Lampa.Search if available
-            if (Lampa.Search && typeof Lampa.Search.open === 'function') {
-                Lampa.Search.open({ source: 'koroT' });
+                });
+                console.log('[KoroT] Menu button added via Lampa.Menu.add()');
                 return;
             }
 
-            // Fallback: push a search activity
-            if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
-                Lampa.Activity.push({
-                    url: '',
-                    title: 'KoroT',
-                    component: 'search',
-                    source: 'koroT',
-                    page: 1
+            // Fallback: append item to an existing side-menu list via Events
+            if (Lampa.Events && typeof Lampa.Events.follow === 'function') {
+                Lampa.Events.follow('menu:build', function (items) {
+                    try {
+                        items.push({
+                            title: 'KoroT',
+                            subtitle: 'Kinogo + Rezka + TorBox',
+                            action: function () {
+                                try { openKoroTSearch(); } catch (e) {
+                                    console.log('[KoroT] ERROR: events menu action:', e.message);
+                                }
+                            }
+                        });
+                        console.log('[KoroT] Menu button injected via Lampa.Events menu:build');
+                    } catch (e) {
+                        console.log('[KoroT] ERROR: menu:build handler:', e.message);
+                    }
                 });
                 return;
             }
 
-            // Fallback 2: open via Lampa.Select
+            console.log('[KoroT] WARNING: No menu API available — button not added');
+        } catch (e) {
+            console.log('[KoroT] ERROR: addMenuButton() exception:', e.message);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Open KoroT search — multiple fallback strategies for 3.1.6
+    // ------------------------------------------------------------------
+    function openKoroTSearch() {
+        try {
+            console.log('[KoroT] openKoroTSearch()');
+
+            // Strategy 1 — Lampa 3.1.6 Activity.push with component:'search'
+            if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
+                Lampa.Activity.push({
+                    url:       '',
+                    title:     'KoroT',
+                    component: 'search',
+                    source:    'koroT',
+                    page:      1
+                });
+                console.log('[KoroT] openKoroTSearch via Activity.push');
+                return;
+            }
+
+            // Strategy 2 — Lampa.Search.open
+            if (Lampa.Search && typeof Lampa.Search.open === 'function') {
+                Lampa.Search.open({ source: 'koroT' });
+                console.log('[KoroT] openKoroTSearch via Search.open');
+                return;
+            }
+
+            // Strategy 3 — Lampa.Controller.toggle to search component
+            if (Lampa.Controller && typeof Lampa.Controller.toggle === 'function') {
+                Lampa.Controller.toggle('search');
+                console.log('[KoroT] openKoroTSearch via Controller.toggle(search)');
+                return;
+            }
+
+            // Strategy 4 — Select dialog (last resort)
             if (Lampa.Select && typeof Lampa.Select.show === 'function') {
                 Lampa.Select.show({
                     title: 'KoroT',
-                    items: [{ title: '\u041f\u043e\u0438\u0441\u043a...', action: 'search' }],
-                    onSelect: function (item) {
+                    items: [{ title: '\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043f\u043e\u0438\u0441\u043a' }],
+                    onSelect: function () {
                         try {
                             if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
                                 Lampa.Activity.push({
-                                    url: '',
-                                    title: 'KoroT',
-                                    component: 'search',
-                                    source: 'koroT',
-                                    page: 1
+                                    url: '', title: 'KoroT',
+                                    component: 'search', source: 'koroT', page: 1
                                 });
                             }
                         } catch (e) {
-                            console.log('[KoroT] Select onSelect exception:', e.message);
+                            console.log('[KoroT] ERROR: Select onSelect:', e.message);
                         }
                     }
                 });
                 return;
             }
 
-            console.log('[KoroT] No navigation API available to open search');
+            console.log('[KoroT] ERROR: openKoroTSearch — no navigation API available');
         } catch (e) {
-            console.log('[KoroT] openKoroTSearch exception:', e.message);
+            console.log('[KoroT] ERROR: openKoroTSearch() exception:', e.message);
         }
     }
 
     // ------------------------------------------------------------------
-    // Boot: wait for Lampa to be ready, then register
+    // Boot — waits for Lampa to initialise, then sets everything up
     // ------------------------------------------------------------------
+    function init() {
+        try {
+            console.log('[KoroT] init() — registering source and menu button');
+            registerSource();
+            addMenuButton();
+            console.log('[KoroT] init() done');
+        } catch (e) {
+            console.log('[KoroT] ERROR: init() exception:', e.message);
+        }
+    }
+
     function boot() {
         try {
             if (typeof Lampa === 'undefined') {
-                console.log('[KoroT] Lampa not defined yet, retrying in 500ms');
+                console.log('[KoroT] Lampa not ready, retrying in 500ms...');
                 setTimeout(boot, 500);
                 return;
             }
 
-            // Wait for Lampa.Listener / ready event if available
+            console.log('[KoroT] boot() — Lampa found');
+
+            // Lampa 3.1.6 fires 'ready' when the UI is fully initialised
             if (Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
                 Lampa.Listener.follow('ready', function () {
                     try {
-                        console.log('[KoroT] Lampa ready event — initialising');
-                        registerSource();
-                        addMenuButton();
+                        console.log('[KoroT] Lampa "ready" event received');
+                        init();
                     } catch (e) {
-                        console.log('[KoroT] ready handler exception:', e.message);
+                        console.log('[KoroT] ERROR: ready handler:', e.message);
                     }
                 });
-                // Also call immediately in case 'ready' already fired
-                registerSource();
-                addMenuButton();
-            } else {
-                // No listener — just initialise now
-                registerSource();
-                addMenuButton();
             }
 
-            console.log('[KoroT] Boot complete');
+            // Also call init() immediately — if 'ready' already fired we must not miss it
+            init();
+
+            console.log('[KoroT] boot() complete');
         } catch (e) {
-            console.log('[KoroT] boot exception:', e.message);
+            console.log('[KoroT] ERROR: boot() exception:', e.message);
         }
     }
 
@@ -407,15 +458,14 @@
     // Entry point
     // ------------------------------------------------------------------
     try {
-        if (document.readyState === 'loading') {
+        if (typeof document !== 'undefined' && document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', boot);
         } else {
             boot();
         }
     } catch (e) {
-        console.log('[KoroT] Entry point exception:', e.message);
-        // Last resort
-        try { boot(); } catch (e2) { /* silent */ }
+        console.log('[KoroT] ERROR: entry point exception:', e.message);
+        try { boot(); } catch (e2) { /* intentionally silent */ }
     }
 
 })();

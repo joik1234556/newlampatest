@@ -133,7 +133,7 @@ class TestStreamStart:
         assert body["status"] in ("queued", "ready")
 
     def test_start_returns_immediately_if_cached(self, client):
-        # Prime direct_url cache
+        # Prime direct_url cache (using infohash as legacy key)
         from app.cache import direct_url_cache
         direct_url_cache.set(
             "da39a3ee5e6b4b0d3255bfef95601890afd80709",
@@ -144,7 +144,31 @@ class TestStreamStart:
             json={"variant_id": "v_cached", "magnet": DEMO_MAGNET, "title": "Cached"},
         )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ready"
+        body = resp.json()
+        assert body["status"] == "ready"
+        # New: direct_url must be included in /stream/start when status=ready
+        assert body.get("direct_url") == "https://cdn.torbox.app/cached.mkv"
+
+    def test_start_dedup_same_magnet_returns_same_job(self, client):
+        """Submitting the same magnet twice should reuse the in-flight job."""
+        UNIQUE_MAGNET = (
+            "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "&dn=DedupeTest"
+        )
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "555"}}
+            r1 = client.post(
+                "/stream/start",
+                json={"variant_id": "vd1", "magnet": UNIQUE_MAGNET, "title": "Dedup"},
+            )
+            r2 = client.post(
+                "/stream/start",
+                json={"variant_id": "vd2", "magnet": UNIQUE_MAGNET, "title": "Dedup"},
+            )
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        # Second request must return the same job_id
+        assert r1.json()["job_id"] == r2.json()["job_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +249,62 @@ class TestTTLCache:
         from app.cache import TTLCache
         c = TTLCache()
         assert c.get("nonexistent") is None
+
+
+class TestCacheBackend:
+    """Verify CacheBackend sync interface works without Redis."""
+
+    def test_sync_set_get(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test", default_ttl=60)
+        cb.set("key1", "value1")
+        assert cb.get("key1") == "value1"
+
+    def test_sync_delete(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test2", default_ttl=60)
+        cb.set("k", "v")
+        cb.delete("k")
+        assert cb.get("k") is None
+
+    def test_sync_miss(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test3", default_ttl=60)
+        assert cb.get("missing") is None
+
+    def test_async_fallback_to_memory(self):
+        """Async aget/aset fall back to in-memory when Redis is unavailable."""
+        import asyncio
+        from app.cache import CacheBackend
+
+        async def run():
+            cb = CacheBackend(prefix="testasync", default_ttl=60)
+            await cb.aset("hello", "world")
+            val = await cb.aget("hello")
+            return val
+
+        val = asyncio.get_event_loop().run_until_complete(run())
+        assert val == "world"
+
+    def test_async_dict_roundtrip(self):
+        """Dicts serialise and deserialise correctly."""
+        import asyncio
+        from app.cache import CacheBackend
+
+        async def run():
+            cb = CacheBackend(prefix="testdict", default_ttl=60)
+            data = {"foo": "bar", "n": 42}
+            await cb.aset("d", data)
+            return await cb.aget("d")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == {"foo": "bar", "n": 42}
+
+    def test_singletons_exist(self):
+        from app.cache import direct_url_cache, job_cache, magnet_job_cache, variants_cache
+        from app.cache import CacheBackend
+        for cache in (variants_cache, direct_url_cache, job_cache, magnet_job_cache):
+            assert isinstance(cache, CacheBackend)
 
 
 # ---------------------------------------------------------------------------

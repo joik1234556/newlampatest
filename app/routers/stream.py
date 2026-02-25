@@ -23,7 +23,10 @@ async def stream_start(
 ) -> dict:
     """
     Submit a magnet link for TorBox processing.
-    Returns ``{ job_id, status }`` immediately.
+
+    Returns immediately with one of:
+    - ``{ job_id, status: "ready", direct_url }``  — cache hit, play now
+    - ``{ job_id, status: "queued" }``              — job created, poll /stream/status
     """
     if not body.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="Invalid magnet link")
@@ -41,7 +44,10 @@ async def stream_start(
         logger.error("[Easy-Mod][/stream/start] error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return {"job_id": job.job_id, "status": job.state}
+    response: dict = {"job_id": job.job_id, "status": job.state}
+    if job.state == "ready" and job.direct_url:
+        response["direct_url"] = job.direct_url
+    return response
 
 
 @router.get("/status", response_model=StreamStatusResponse)

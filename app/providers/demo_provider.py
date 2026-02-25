@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 def _make_id(*parts: str) -> str:
-    return hashlib.md5(":".join(parts).encode()).hexdigest()[:12]
+    """Stable SHA-1-based variant ID (first 12 hex chars)."""
+    return hashlib.sha1(":".join(parts).encode()).hexdigest()[:12]
 
 
 class DemoProvider(BaseProvider):

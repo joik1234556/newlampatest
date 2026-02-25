@@ -45,6 +45,7 @@ class StreamJob(BaseModel):
     job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     variant_id: str = ""
     magnet: str = ""
+    magnet_hash: str = ""          # sha1 of magnet string (for dedup + cache lookup)
     title: str = ""
     state: str = "queued"          # queued | preparing | ready | failed
     progress: float = 0.0

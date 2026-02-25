@@ -1,24 +1,32 @@
 /**
  * Easy-Mod — прямые стримы через TorBox для Lampa 3.1.6
- * Версия: 1.0
+ * Версия: 2.0
  * Backend: http://46.225.222.255:8000
  *
- * Архитектура:
- *   Кнопка «Easy-Mod» → easy_mod_variants → easy_mod_wait → Lampa.Player
+ * Новое в v2.0:
+ *   - Мгновенный старт (без экрана ожидания) при cache hit в /stream/start
+ *   - Адаптивный polling: первые 30s каждые 2s, потом каждые 5s
+ *   - Улучшенный экран ошибки с кнопкой «Вернуться к вариантам»
+ *   - Дедуп: повторный выбор того же варианта → тот же job_id
  *
  * Компоненты:
  *   easy_mod_variants  — список вариантов (язык, озвучка, качество)
- *   easy_mod_wait      — экран ожидания с polling /stream/status
+ *   easy_mod_wait      — экран ожидания с adaptive polling /stream/status
  */
 (function () {
     'use strict';
 
-    console.log('[Easy-Mod] Plugin v1.0 loaded for Lampa 3.1.6');
+    console.log('[Easy-Mod] Plugin v2.0 loaded for Lampa 3.1.6');
 
     var API_URL = 'http://46.225.222.255:8000';
 
+    // Adaptive polling thresholds (ms)
+    var POLL_FAST_UNTIL_MS  = 30000;   // first 30 s: fast polling
+    var POLL_FAST_INTERVAL  = 2000;    // 2 s
+    var POLL_SLOW_INTERVAL  = 5000;    // 5 s
+
     // ------------------------------------------------------------------
-    // HTTP helper — Lampa.Request().silent() (correct for 3.1.6)
+    // HTTP helpers — Lampa.Request().silent() (correct for 3.1.6)
     // ------------------------------------------------------------------
     function buildQs(params) {
         var parts = [];
@@ -80,11 +88,22 @@
     }
 
     // ------------------------------------------------------------------
-    // Utility: quality sort rank
+    // Player helper
     // ------------------------------------------------------------------
-    function qualityRank(q) {
-        var order = { '360p': 0, '480p': 1, '720p': 2, '1080p': 3, '2160p': 4, '4k': 4, '2k': 3 };
-        return (order[String(q).toLowerCase()] !== undefined) ? order[String(q).toLowerCase()] : 2;
+    function playDirect(url, title, poster) {
+        try {
+            console.log('[Easy-Mod] playing url:', url.substring(0, 80));
+            Lampa.Player.play({
+                title:     title  || 'Easy-Mod',
+                url:       url,
+                poster:    poster || '',
+                subtitles: []
+            });
+            Lampa.Player.playlist([{ title: title || 'Easy-Mod', url: url }]);
+        } catch (e) {
+            console.log('[Easy-Mod] ERROR playDirect:', e.message);
+            try { Lampa.Noty.show('[Easy-Mod] \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043f\u043b\u0435\u0435\u0440'); } catch (e2) { /* silent */ }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -167,8 +186,7 @@
             var i;
             for (i = 0; i < variants.length; i++) {
                 (function (v) {
-                    var row = $('<div class="easy-mod-item selector">')
-                        .attr('data-id', v.id);
+                    var row = $('<div class="easy-mod-item selector">').attr('data-id', v.id);
 
                     var labelEl = $('<div class="easy-mod-item__label">').text(v.label || v.voice);
                     var meta    = $('<div class="easy-mod-item__meta">');
@@ -197,7 +215,6 @@
 
             self._render.append(list);
 
-            // Focus first item
             try {
                 Lampa.Controller.enable('content');
                 self._render.find('.selector').first().focus();
@@ -220,16 +237,32 @@
 
             console.log('[Easy-Mod] POST /stream/start variant_id:', variant.id);
 
+            // Show loading indicator on the button row
+            try { self._render.find('[data-id="' + variant.id + '"]').addClass('easy-mod-item--loading'); } catch (e) { /* silent */ }
+
             apiPost('/stream/start', body, function (data) {
                 try {
-                    var jobId = (data && data.job_id) ? data.job_id : '';
-                    console.log('[Easy-Mod] job created:', jobId, 'status:', data && data.status);
+                    var jobId     = (data && data.job_id)     ? data.job_id     : '';
+                    var status    = (data && data.status)     ? data.status     : '';
+                    var directUrl = (data && data.direct_url) ? data.direct_url : '';
+
+                    console.log('[Easy-Mod] /stream/start → job_id:', jobId, 'status:', status);
 
                     if (!jobId) {
-                        Lampa.Noty.show('[Easy-Mod] \u041e\u0448\u0438\u0431\u043a\u0430: job_id \u043d\u0435 \u043f\u043e\u043b\u0443\u0447\u0435\u043d');
+                        try { Lampa.Noty.show('[Easy-Mod] \u041e\u0448\u0438\u0431\u043a\u0430: job_id \u043d\u0435 \u043f\u043e\u043b\u0443\u0447\u0435\u043d'); } catch (e) { /* silent */ }
                         return;
                     }
 
+                    // ── INSTANT PLAY: cache hit, no wait screen needed ──────────
+                    if (status === 'ready' && directUrl) {
+                        console.log('[Easy-Mod] cache hit — instant play');
+                        var playTitle = (self._movie.title || 'Easy-Mod')
+                            + (variant.quality ? ' [' + variant.quality + ']' : '');
+                        playDirect(directUrl, playTitle, self._movie.poster || '');
+                        return;
+                    }
+
+                    // ── QUEUED: open wait screen with adaptive polling ───────────
                     if (Lampa.Activity && typeof Lampa.Activity.push === 'function') {
                         Lampa.Activity.push({
                             component: 'easy_mod_wait',
@@ -241,11 +274,11 @@
                     }
                 } catch (e) {
                     console.log('[Easy-Mod] ERROR _startStream handler:', e.message);
-                    Lampa.Noty.show('[Easy-Mod] \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u043f\u0443\u0441\u043a\u0430');
+                    try { Lampa.Noty.show('[Easy-Mod] \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u043f\u0443\u0441\u043a\u0430'); } catch (e2) { /* silent */ }
                 }
             }, function (err) {
                 console.log('[Easy-Mod] ERROR /stream/start:', err);
-                Lampa.Noty.show('[Easy-Mod] \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0441\u0442\u0440\u0438\u043c: ' + String(err));
+                try { Lampa.Noty.show('[Easy-Mod] \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0441\u0442\u0440\u0438\u043c: ' + String(err)); } catch (e) { /* silent */ }
             });
         } catch (e) {
             console.log('[Easy-Mod] ERROR _startStream:', e.message);
@@ -256,7 +289,7 @@
         try {
             this._render.html(
                 '<div class="easy-mod-error">'
-                + '\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438: ' + msg
+                + '\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438: ' + String(msg)
                 + '</div>'
             );
         } catch (e) {
@@ -277,17 +310,18 @@
     };
 
     // ------------------------------------------------------------------
-    // Component 2: easy_mod_wait
+    // Component 2: easy_mod_wait  (adaptive polling)
     // ------------------------------------------------------------------
     function EasyModWait(object) {
-        this._object   = object || {};
-        this._movie    = (object && object.movie)   ? object.movie   : {};
-        this._jobId    = (object && object.job_id)  ? object.job_id  : '';
-        this._variant  = (object && object.variant) ? object.variant : {};
-        this._render   = $('<div class="easy-mod-wait">');
-        this._timer    = null;
-        this._destroy  = false;
-        this._played   = false;
+        this._object     = object || {};
+        this._movie      = (object && object.movie)   ? object.movie   : {};
+        this._jobId      = (object && object.job_id)  ? object.job_id  : '';
+        this._variant    = (object && object.variant) ? object.variant : {};
+        this._render     = $('<div class="easy-mod-wait">');
+        this._timer      = null;
+        this._destroy    = false;
+        this._played     = false;
+        this._startedAt  = Date.now();   // for adaptive polling
         console.log('[Easy-Mod] EasyModWait init job_id:', this._jobId);
     }
 
@@ -298,29 +332,25 @@
     EasyModWait.prototype.start = function () {
         try {
             console.log('[Easy-Mod] easy_mod_wait.start() job_id:', this._jobId);
-            this._showWaiting(0);
+            this._showWaiting(0, '\u0417\u0430\u043f\u0440\u043e\u0441 \u043a TorBox\u2026');
             this._poll();
         } catch (e) {
             console.log('[Easy-Mod] ERROR easy_mod_wait.start():', e.message);
         }
     };
 
-    EasyModWait.prototype._showWaiting = function (progress) {
+    EasyModWait.prototype._showWaiting = function (progress, statusText) {
         try {
             var pct = Math.round((progress || 0) * 100);
+            var st  = statusText || ('\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026 ' + pct + '%');
             this._render.html(
                 '<div class="easy-mod-wait__inner">'
                 + '<div class="easy-mod-spinner"></div>'
-                + '<div class="easy-mod-wait__title">'
-                + '\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026'
-                + '</div>'
-                + '<div class="easy-mod-wait__progress">' + pct + '%</div>'
+                + '<div class="easy-mod-wait__title">' + st + '</div>'
                 + '<div class="easy-mod-wait__hint">'
                 + '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0447\u0435\u0440\u0435\u0437 TorBox. \u041f\u043e\u0434\u043e\u0436\u0434\u0438\u0442\u0435\u2026'
                 + '</div>'
-                + '<div class="easy-mod-wait__back selector">'
-                + '\u041d\u0430\u0437\u0430\u0434'
-                + '</div>'
+                + '<div class="easy-mod-wait__back selector">\u041d\u0430\u0437\u0430\u0434</div>'
                 + '</div>'
             );
 
@@ -340,6 +370,11 @@
         }
     };
 
+    EasyModWait.prototype._nextInterval = function () {
+        var elapsed = Date.now() - this._startedAt;
+        return (elapsed < POLL_FAST_UNTIL_MS) ? POLL_FAST_INTERVAL : POLL_SLOW_INTERVAL;
+    };
+
     EasyModWait.prototype._poll = function () {
         var self = this;
         try {
@@ -350,16 +385,19 @@
                     if (self._destroy || self._played) { return; }
 
                     var state    = (data && data.state)      ? data.state      : 'unknown';
-                    var progress = (data && data.progress)   ? data.progress   : 0;
-                    var url      = (data && data.direct_url) ? data.direct_url : '';
-                    var message  = (data && data.message)    ? data.message    : '';
+                    var progress = (data && data.progress != null) ? data.progress : 0;
+                    var url      = (data && data.direct_url) ? data.direct_url  : '';
+                    var message  = (data && data.message)    ? data.message     : '';
 
-                    console.log('[Easy-Mod] poll state:', state, 'progress:', progress);
+                    console.log('[Easy-Mod] poll state:', state, 'progress:', progress,
+                                'elapsed:', Math.round((Date.now() - self._startedAt) / 1000) + 's');
 
                     if (state === 'ready' && url) {
                         self._played = true;
                         self._stopPolling();
-                        self._play(url);
+                        var title = (self._movie.title || 'Easy-Mod')
+                            + (self._variant && self._variant.quality ? ' [' + self._variant.quality + ']' : '');
+                        playDirect(url, title, self._movie.poster || '');
                         return;
                     }
 
@@ -369,24 +407,36 @@
                         return;
                     }
 
-                    self._showWaiting(progress);
+                    var statusText = '\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026 '
+                        + Math.round(progress * 100) + '%';
+                    if (state === 'queued')    { statusText = '\u0412 \u043e\u0447\u0435\u0440\u0435\u0434\u0438\u2026'; }
+                    if (state === 'preparing') {
+                        statusText = '\u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u043f\u043e\u0442\u043e\u043a\u0430\u2026 '
+                            + Math.round(progress * 100) + '%';
+                    }
 
-                    // Schedule next poll in 2 seconds
+                    self._showWaiting(progress, statusText);
+
+                    var interval = self._nextInterval();
                     self._timer = setTimeout(function () {
-                        try { self._poll(); } catch (e) { console.log('[Easy-Mod] ERROR poll timer:', e.message); }
-                    }, 2000);
+                        try { self._poll(); } catch (e) {
+                            console.log('[Easy-Mod] ERROR poll timer:', e.message);
+                        }
+                    }, interval);
                 } catch (e) {
                     console.log('[Easy-Mod] ERROR poll handler:', e.message);
-                    self._timer = setTimeout(function () {
-                        try { self._poll(); } catch (e2) { /* silent */ }
-                    }, 3000);
+                    if (!self._destroy) {
+                        self._timer = setTimeout(function () {
+                            try { self._poll(); } catch (e2) { /* silent */ }
+                        }, POLL_SLOW_INTERVAL);
+                    }
                 }
             }, function (err) {
                 console.log('[Easy-Mod] ERROR poll request:', err);
                 if (!self._destroy) {
                     self._timer = setTimeout(function () {
                         try { self._poll(); } catch (e) { /* silent */ }
-                    }, 3000);
+                    }, POLL_SLOW_INTERVAL);
                 }
             });
         } catch (e) {
@@ -394,38 +444,16 @@
         }
     };
 
-    EasyModWait.prototype._play = function (url) {
-        try {
-            console.log('[Easy-Mod] starting playback url:', url.substring(0, 80));
-            var title = (this._movie.title || 'Easy-Mod')
-                + (this._variant.quality ? ' [' + this._variant.quality + ']' : '');
-
-            Lampa.Player.play({
-                title:     title,
-                url:       url,
-                poster:    (this._movie.poster || ''),
-                subtitles: []
-            });
-
-            Lampa.Player.playlist([{
-                title: title,
-                url:   url
-            }]);
-        } catch (e) {
-            console.log('[Easy-Mod] ERROR _play:', e.message);
-            Lampa.Noty.show('[Easy-Mod] \u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043f\u043b\u0435\u0435\u0440: ' + e.message);
-        }
-    };
-
     EasyModWait.prototype._showError = function (msg) {
         try {
             this._render.html(
                 '<div class="easy-mod-wait__inner">'
-                + '<div class="easy-mod-error">\u041e\u0448\u0438\u0431\u043a\u0430: ' + msg + '</div>'
-                + '<div class="easy-mod-wait__back selector">\u041d\u0430\u0437\u0430\u0434</div>'
+                + '<div class="easy-mod-error">\u041e\u0448\u0438\u0431\u043a\u0430: ' + String(msg) + '</div>'
+                + '<div class="easy-mod-wait__back selector">'
+                + '\u0412\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u043a \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u043c'
+                + '</div>'
                 + '</div>'
             );
-            var self = this;
             this._render.find('.easy-mod-wait__back').on('hover:enter click', function () {
                 try {
                     if (Lampa.Activity && typeof Lampa.Activity.backward === 'function') {
@@ -489,7 +517,7 @@
     }
 
     // ------------------------------------------------------------------
-    // Inject "Easy-Mod" button on film detail page
+    // Inject «Easy-Mod» button on film detail page
     // ------------------------------------------------------------------
     function hookFilmPage() {
         try {
@@ -503,10 +531,10 @@
                     var component = (e && e.object) ? e.object : e;
                     var movie = null;
 
-                    if (component && component.movie)        { movie = component.movie; }
-                    else if (component && component.card)    { movie = component.card; }
-                    else if (component && component.data)    { movie = component.data; }
-                    else if (e && e.data && e.data.movie)    { movie = e.data.movie; }
+                    if (component && component.movie)     { movie = component.movie; }
+                    else if (component && component.card) { movie = component.card; }
+                    else if (component && component.data) { movie = component.data; }
+                    else if (e && e.data && e.data.movie) { movie = e.data.movie; }
 
                     if (!movie) {
                         console.log('[Easy-Mod] full event: cannot resolve movie');
@@ -515,7 +543,6 @@
 
                     console.log('[Easy-Mod] full event for:', movie.title);
 
-                    // Delay to let Lampa finish rendering the page
                     setTimeout(function () {
                         try {
                             injectButton(component, movie);

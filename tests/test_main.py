@@ -188,6 +188,104 @@ class TestEasyDirect:
 
 
 # ---------------------------------------------------------------------------
+# /torbox/search
+# ---------------------------------------------------------------------------
+
+class TestTorboxSearch:
+    def test_torbox_search_empty_query(self, client):
+        resp = client.get("/torbox/search?q=   ")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"] == []
+        assert "message" in body
+
+    def test_torbox_search_returns_structure(self, client):
+        resp = client.get("/torbox/search?q=Дюна+2")
+        assert resp.status_code == 200
+        body = resp.json()
+        # Must always have results (list) and message (str)
+        assert isinstance(body["results"], list)
+        assert isinstance(body["message"], str)
+        assert body["query"] == "Дюна 2"
+
+    def test_torbox_search_missing_param(self, client):
+        resp = client.get("/torbox/search")
+        assert resp.status_code == 422  # Unprocessable Entity — required param missing
+
+
+# ---------------------------------------------------------------------------
+# /torbox/get
+# ---------------------------------------------------------------------------
+
+class TestTorboxGet:
+    def test_torbox_get_invalid_magnet(self, client):
+        resp = client.get("/torbox/get?magnet=not-a-magnet")
+        assert resp.status_code == 400
+
+    def test_torbox_get_missing_param(self, client):
+        resp = client.get("/torbox/get")
+        assert resp.status_code == 422
+
+    def test_torbox_get_ready(self, client):
+        fake_files = [{"title": "film.mkv", "quality": "1080p", "url": "https://cdn.torbox.app/film.mkv", "size": 1000}]
+        with (
+            patch("app.main.torbox.check_cached", new_callable=AsyncMock) as mcc,
+            patch("app.main.torbox.add_magnet", new_callable=AsyncMock) as mam,
+            patch("app.main.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt,
+            patch("app.main.torbox.build_direct_links", new_callable=AsyncMock) as mbl,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mcc.return_value = False
+            mam.return_value = {"data": {"torrent_id": "42"}}
+            mgt.return_value = {
+                "id": "42",
+                "download_state": "seeding",
+                "files": [{"id": 1, "name": "film.mkv"}],
+            }
+            mbl.return_value = fake_files
+            resp = client.get(
+                "/torbox/get?magnet=magnet:?xt=urn:btih:DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        assert len(body["files"]) == 1
+        assert body["files"][0]["url"].startswith("https://")
+
+    def test_torbox_get_processing(self, client):
+        with (
+            patch("app.main.torbox.check_cached", new_callable=AsyncMock) as mcc,
+            patch("app.main.torbox.add_magnet", new_callable=AsyncMock) as mam,
+            patch("app.main.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mcc.return_value = False
+            mam.return_value = {"data": {"torrent_id": "55"}}
+            mgt.return_value = None  # still not in list
+            resp = client.get(
+                "/torbox/get?magnet=magnet:?xt=urn:btih:DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
+            )
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "processing"
+        assert body["files"] == []
+
+    def test_torbox_get_add_magnet_error(self, client):
+        with (
+            patch("app.main.torbox.check_cached", new_callable=AsyncMock) as mcc,
+            patch("app.main.torbox.add_magnet", new_callable=AsyncMock) as mam,
+        ):
+            mcc.return_value = False
+            mam.side_effect = Exception("TorBox API error")
+            resp = client.get(
+                "/torbox/get?magnet=magnet:?xt=urn:btih:DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
+            )
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
 
@@ -212,3 +310,21 @@ class TestExtractInfohash:
     def test_extract_infohash_none(self):
         from app.main import _extract_infohash
         assert _extract_infohash("not a magnet") is None
+
+
+# ---------------------------------------------------------------------------
+# torbox helpers
+# ---------------------------------------------------------------------------
+
+class TestTorboxHelpers:
+    def test_guess_quality_1080p(self):
+        from app.torbox import _guess_quality
+        assert _guess_quality("Movie.1080p.BluRay.mkv") == "1080p"
+
+    def test_guess_quality_4k(self):
+        from app.torbox import _guess_quality
+        assert _guess_quality("Film.4K.HDR.mkv") == "4K"
+
+    def test_guess_quality_unknown(self):
+        from app.torbox import _guess_quality
+        assert _guess_quality("somefile.avi") == "unknown"

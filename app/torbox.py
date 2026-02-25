@@ -93,3 +93,44 @@ async def get_torrent_by_id(torrent_id: int | str) -> dict | None:
     except Exception as exc:
         logger.error("TorBox get_torrent_by_id error: %s", exc)
     return None
+
+
+def _guess_quality(name: str) -> str:
+    """Guess video quality from a filename or label string."""
+    name_lower = name.lower()
+    for q in ("2160p", "4k", "1080p", "720p", "480p", "360p"):
+        if q in name_lower:
+            return q.upper() if q == "4k" else q
+    return "unknown"
+
+
+async def build_direct_links(
+    torrent_id: int | str, files: list[dict]
+) -> list[dict]:
+    """
+    Request direct download URLs for every file inside a torrent and return
+    a list of ``{ title, quality, url, size }`` dicts ready for the Lampa player.
+    """
+    result: list[dict] = []
+    for idx, f in enumerate(files):
+        file_id = f.get("id")
+        if file_id is None:
+            continue
+        try:
+            url = await request_download_link(torrent_id, file_id)
+            if url:
+                name = f.get("name") or f.get("short_name") or f"File {idx + 1}"
+                result.append(
+                    {
+                        "title": name,
+                        "quality": _guess_quality(name),
+                        "url": url,
+                        "size": f.get("size", 0),
+                    }
+                )
+        except Exception as exc:
+            logger.error(
+                "build_direct_links torrent_id=%s file_id=%s error: %s",
+                torrent_id, file_id, exc,
+            )
+    return result

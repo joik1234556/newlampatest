@@ -6,12 +6,16 @@ Endpoints
 GET /search?q=          – parallel search across Kinogo + Rezka mirrors
 GET /get?url=&source=   – parse film/series detail page
 GET /easy/direct        – TorBox direct-download link via magnet or torrent_id+file_idx
+GET /torbox/search?q=   – search for torrent variants (Jackett pending; returns stub)
+GET /torbox/get?magnet= – add magnet to TorBox, poll until ready, return direct files
 GET /health             – TorBox auth check + service status
+GET /static/*           – serve static plugin files
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -19,6 +23,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -41,9 +46,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 limiter = Limiter(key_func=get_remote_address)
 
-# TorBox polling settings
+# TorBox polling settings for /easy/direct (short, ~60 s)
 _MAX_POLL_ATTEMPTS: int = 12
 _POLL_DELAY_SECONDS: int = 5
+
+# TorBox polling settings for /torbox/get (long, ~4 min)
+_TORBOX_POLL_ATTEMPTS: int = 48   # 48 × 5 s = 240 s ≈ 4 min
+_TORBOX_POLL_DELAY: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +74,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 app = FastAPI(
     title="Lampa Backend",
     description="Промежуточный слой между Lampa и источниками Kinogo / Rezka / TorBox",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -78,6 +87,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static plugin files (e.g. /static/koroT_final.js)
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    logger.info("Static files mounted from %s", _STATIC_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -269,4 +284,133 @@ async def easy_direct(
     raise HTTPException(
         status_code=400,
         detail="Provide either 'magnet' or both 'torrent_id' and 'file_idx'",
+    )
+
+
+# ---------------------------------------------------------------------------
+# TorBox-as-source routes (for Lampa KoroT plugin v2.0)
+# ---------------------------------------------------------------------------
+
+@app.get("/torbox/search", tags=["torbox"])
+@limiter.limit(RATE_LIMIT)
+async def torbox_search(
+    request: Request,
+    q: str = Query(..., description="Movie or series title to search for"),
+):
+    """
+    Search for torrent variants by title.
+
+    Currently returns empty results — Jackett integration is planned.
+    Use ``/torbox/get?magnet=<magnet>`` to resolve a known magnet directly.
+
+    Returns ``{ results: [], message: str, query: str }``.
+    """
+    if not q.strip():
+        return {"results": [], "message": "Empty query", "query": q}
+
+    logger.info("torbox_search query=%s", q)
+
+    # TODO: integrate Jackett / other indexers here
+    return {
+        "results": [],
+        "message": (
+            "Поиск по торрентам временно недоступен (Jackett в разработке). "
+            "Используйте /torbox/get?magnet=<magnet> для прямой ссылки."
+        ),
+        "query": q,
+    }
+
+
+@app.get("/torbox/get", tags=["torbox"])
+@limiter.limit(RATE_LIMIT)
+async def torbox_get(
+    request: Request,
+    magnet: str = Query(..., description="Magnet link to resolve via TorBox"),
+):
+    """
+    Add a magnet to TorBox, poll until files are ready (up to 4 minutes),
+    and return direct HTTPS download links.
+
+    Returns ``{ status: "ready"|"processing"|"error", files: [...], torrent_id }``.
+
+    Each file: ``{ title, quality, url, size }``.
+    """
+    if not TORBOX_API_KEY:
+        raise HTTPException(status_code=503, detail="TorBox API key not configured")
+
+    if not magnet.startswith("magnet:"):
+        raise HTTPException(status_code=400, detail="Invalid magnet link — must start with 'magnet:'")
+
+    logger.info("torbox_get magnet=%s...", magnet[:60])
+
+    # Check cache first (avoids adding duplicate)
+    infohash = _extract_infohash(magnet)
+    if infohash:
+        cached = await torbox.check_cached(infohash)
+        if cached:
+            logger.info("torbox_get: TorBox cache hit for %s", infohash)
+
+    # Add magnet to TorBox
+    try:
+        result = await torbox.add_magnet(magnet)
+    except Exception as exc:
+        logger.error("torbox_get add_magnet error: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "files": [], "error": str(exc)},
+        )
+
+    data = result.get("data") or {}
+    torrent_id = data.get("torrent_id") or data.get("id")
+
+    if not torrent_id:
+        logger.warning("torbox_get: no torrent_id in TorBox response: %s", result)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "processing",
+                "files": [],
+                "torrent_id": None,
+                "message": "Торрент принят, но ID не возвращён. Повторите позже.",
+            },
+        )
+
+    # Poll for readiness — up to 4 minutes (48 × 5 s)
+    for attempt in range(_TORBOX_POLL_ATTEMPTS):
+        await asyncio.sleep(_TORBOX_POLL_DELAY)
+
+        torrent = await torbox.get_torrent_by_id(torrent_id)
+        if torrent is None:
+            logger.debug("torbox_get poll attempt=%d: torrent not found yet", attempt + 1)
+            continue
+
+        state = torrent.get("download_state", "")
+        torrent_files = torrent.get("files") or []
+
+        logger.info(
+            "torbox_get poll attempt=%d state=%s files=%d",
+            attempt + 1, state, len(torrent_files),
+        )
+
+        ready_states = ("seeding", "downloading", "completed", "cached", "ready")
+        if state in ready_states and torrent_files:
+            files = await torbox.build_direct_links(torrent_id, torrent_files)
+            if files:
+                logger.info("torbox_get: ready with %d file(s)", len(files))
+                return {
+                    "status": "ready",
+                    "files": files,
+                    "torrent_id": torrent_id,
+                }
+
+    # Timed out — tell client to retry
+    logger.warning("torbox_get: polling timed out for torrent_id=%s", torrent_id)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "processing",
+            "files": [],
+            "torrent_id": torrent_id,
+            "message": "Торрент ещё загружается. Повторите запрос через несколько минут.",
+        },
     )

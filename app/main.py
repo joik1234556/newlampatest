@@ -8,7 +8,10 @@ GET /get?url=&source=   – parse film/series detail page
 GET /easy/direct        – TorBox direct-download link via magnet or torrent_id+file_idx
 GET /torbox/search?q=   – search for torrent variants (Jackett pending; returns stub)
 GET /torbox/get?magnet= – add magnet to TorBox, poll until ready, return direct files
-GET /health             – TorBox auth check + service status
+GET /health             – service liveness check (Easy-Mod)
+GET /variants           – Easy-Mod variant list
+POST /stream/start      – Easy-Mod: create TorBox streaming job
+GET /stream/status      – Easy-Mod: poll job status
 GET /static/*           – serve static plugin files
 """
 from __future__ import annotations
@@ -24,27 +27,27 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from app import torbox
 from app.scraper import kinogo, rezka
 from app.config import RATE_LIMIT, TORBOX_API_KEY
+from app.logging_conf import setup_logging
+from app.limiter_shared import limiter
+from app.routers import health as health_router
+from app.routers import variants as variants_router
+from app.routers import stream as stream_router
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Rate limiter
+# Rate limiter (shared — routers import from app.limiter_shared)
 # ---------------------------------------------------------------------------
-limiter = Limiter(key_func=get_remote_address)
 
 # TorBox polling settings for /easy/direct (short, ~60 s)
 _MAX_POLL_ATTEMPTS: int = 12
@@ -88,7 +91,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static plugin files (e.g. /static/koroT_final.js)
+# ---------------------------------------------------------------------------
+# Easy-Mod routers (variants + stream; health is provided by the legacy
+# /health route below which includes TorBox status)
+# ---------------------------------------------------------------------------
+app.include_router(variants_router.router)
+app.include_router(stream_router.router)
+
+# Serve static plugin files (e.g. /static/easy-mod.js)
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

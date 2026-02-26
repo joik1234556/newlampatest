@@ -332,3 +332,236 @@ class TestVariantsService:
             assert v.id
             assert v.label
             assert v.magnet.startswith("magnet:")
+
+
+# ---------------------------------------------------------------------------
+# TorrentioProvider unit tests
+# ---------------------------------------------------------------------------
+
+class TestTorrentioProvider:
+    def test_returns_empty_without_tmdb_id(self):
+        import asyncio
+        from app.providers.torrentio import TorrentioProvider
+
+        async def run():
+            p = TorrentioProvider()
+            return await p.search_variants("Dune", year=2021, tmdb_id=None)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_returns_variants_with_tmdb_id(self):
+        """Mock Torrentio API and verify variant parsing."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        mock_response = {
+            "streams": [
+                {
+                    "name": "YIFY",
+                    "title": "Dune 2021 1080p BluRay\n👤 1200\n💾 8.5 GB",
+                    "infoHash": "aabbccddeeff00112233445566778899aabbccdd",
+                    "fileIdx": 0,
+                    "sources": ["tracker:udp://tracker.opentrackr.org:1337/announce"],
+                },
+                {
+                    "name": "RARBG",
+                    "title": "Dune 2021 2160p\n👤 350\n💾 22 GB",
+                    "infoHash": "1122334455667788990011223344556677889900",
+                    "fileIdx": 0,
+                    "sources": [],
+                },
+            ]
+        }
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_cls.return_value = mock_client
+                p = TorrentioProvider()
+                return await p.search_variants("Dune", year=2021, tmdb_id="438631")
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 2
+        assert all(v.magnet.startswith("magnet:") for v in variants)
+        assert variants[0].quality == "1080p"
+        assert variants[0].seeders == 1200
+        assert variants[0].size_mb > 0
+        assert variants[1].quality == "2160p"
+
+    def test_handles_api_error_gracefully(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(side_effect=Exception("connection error"))
+                mock_client_cls.return_value = mock_client
+                p = TorrentioProvider()
+                return await p.search_variants("Dune", year=2021, tmdb_id="438631")
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+
+# ---------------------------------------------------------------------------
+# JackettProvider unit tests
+# ---------------------------------------------------------------------------
+
+class TestJackettProvider:
+    def test_returns_empty_when_not_configured(self):
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", ""), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", ""):
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_returns_variants_when_configured(self):
+        """Mock Jackett API and verify variant parsing."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        mock_response = {
+            "Results": [
+                {
+                    "Title": "Dune 2021 1080p BluRay x265",
+                    "MagnetUri": "magnet:?xt=urn:btih:aabbccdd1234&dn=Dune+2021",
+                    "Seeders": 500,
+                    "Size": 8_000_000_000,
+                },
+                {
+                    "Title": "Dune 2021 720p WEB",
+                    "MagnetUri": "magnet:?xt=urn:btih:11223344abcd&dn=Dune+2021+720p",
+                    "Seeders": 200,
+                    "Size": 3_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_cls.return_value = mock_client
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 2
+        assert all(v.magnet.startswith("magnet:") for v in variants)
+        assert variants[0].quality == "1080p"
+        assert variants[0].codec == "H265"
+        assert variants[0].seeders == 500
+        assert variants[1].quality == "720p"
+
+    def test_skips_entries_without_magnet(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        mock_response = {
+            "Results": [
+                {"Title": "Dune 1080p", "MagnetUri": "", "Seeders": 100, "Size": 0},
+                {"Title": "Dune 720p", "MagnetUri": "magnet:?xt=urn:btih:abc123", "Seeders": 50, "Size": 0},
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_cls.return_value = mock_client
+                p = JackettProvider()
+                return await p.search_variants("Dune")
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 1  # only the one with a valid magnet
+
+
+# ---------------------------------------------------------------------------
+# /torbox/search endpoint tests
+# ---------------------------------------------------------------------------
+
+class TestTorboxSearch:
+    def test_torbox_search_empty_query(self, client):
+        resp = client.get("/torbox/search?q=   ")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"] == []
+
+    def test_torbox_search_missing_q(self, client):
+        resp = client.get("/torbox/search")
+        assert resp.status_code == 422  # required query param
+
+    def test_torbox_search_returns_structure(self, client):
+        """With mocked providers, verify the response shape."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        fake_variant = Variant(
+            id="abc123",
+            label="Torrentio • 1080P",
+            quality="1080p",
+            seeders=500,
+            size_mb=8000,
+            magnet="magnet:?xt=urn:btih:aabbccddee0011223344556677889900aabbccdd",
+            voice="YIFY",
+            language="multi",
+            codec="H264",
+        )
+
+        with patch(
+            "app.providers.torrentio.TorrentioProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[fake_variant],
+        ), patch(
+            "app.providers.jackett.JackettProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            resp = client.get("/torbox/search?q=Dune&tmdb_id=438631")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "results" in body
+        assert "query" in body
+        assert isinstance(body["results"], list)
+        if body["results"]:
+            r = body["results"][0]
+            assert "id" in r
+            assert "magnet" in r
+            assert "quality" in r
+

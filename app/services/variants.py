@@ -13,6 +13,8 @@ from app.cache import variants_cache
 from app.config import VARIANTS_CACHE_TTL
 from app.models import Variant, VariantsResponse
 from app.providers.demo_provider import DemoProvider
+from app.providers.jackett import JackettProvider
+from app.providers.torrentio import TorrentioProvider
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,11 @@ async def get_variants(
         title, year, tmdb_id,
     )
 
-    providers = [DemoProvider()]
+    # Build provider pipeline:
+    #   1. TorrentioProvider – real results when tmdb_id is available (no config needed)
+    #   2. JackettProvider   – real results when JACKETT_URL + JACKETT_API_KEY are set
+    #   3. DemoProvider      – fallback with static test data when real providers return nothing
+    providers = [TorrentioProvider(), JackettProvider()]
     all_variants: list[Variant] = []
     for provider in providers:
         try:
@@ -64,6 +70,14 @@ async def get_variants(
             )
         except Exception as exc:
             logger.error("[Easy-Mod][Variants] provider=%s error: %s", provider.name, exc)
+
+    # Fall back to DemoProvider when no real results are available
+    if not all_variants:
+        logger.info("[Easy-Mod][Variants] no real results — using DemoProvider fallback")
+        try:
+            all_variants = await DemoProvider().search_variants(title, year, tmdb_id)
+        except Exception as exc:
+            logger.error("[Easy-Mod][Variants] DemoProvider error: %s", exc)
 
     # Deduplicate by variant.id (stable SHA-1 hash from provider)
     seen: set[str] = set()

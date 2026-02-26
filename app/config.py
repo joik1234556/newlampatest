@@ -53,3 +53,7 @@ TORBOX_POLL_SLOW_INTERVAL: int = int(os.getenv("TORBOX_POLL_SLOW_INTERVAL", "5")
 
 # Log level
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+# Jackett integration (optional)
+JACKETT_URL: str = os.getenv("JACKETT_URL", "")
+JACKETT_API_KEY: str = os.getenv("JACKETT_API_KEY", "")

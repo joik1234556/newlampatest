@@ -6,10 +6,10 @@ Endpoints
 GET /search?q=          – parallel search across Kinogo + Rezka mirrors
 GET /get?url=&source=   – parse film/series detail page
 GET /easy/direct        – TorBox direct-download link via magnet or torrent_id+file_idx
-GET /torbox/search?q=   – search for torrent variants (Jackett pending; returns stub)
+GET /torbox/search?q=   – search for torrent variants via Torrentio/Jackett → TorBox
 GET /torbox/get?magnet= – add magnet to TorBox, poll until ready, return direct files
 GET /health             – service liveness check (Easy-Mod)
-GET /variants           – Easy-Mod variant list
+GET /variants           – Easy-Mod variant list (Torrentio/Jackett + Demo fallback)
 POST /stream/start      – Easy-Mod: create TorBox streaming job
 GET /stream/status      – Easy-Mod: poll job status
 GET /static/*           – serve static plugin files
@@ -38,6 +38,8 @@ from app.limiter_shared import limiter
 from app.routers import health as health_router
 from app.routers import variants as variants_router
 from app.routers import stream as stream_router
+from app.providers.torrentio import TorrentioProvider
+from app.providers.jackett import JackettProvider
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -306,27 +308,42 @@ async def easy_direct(
 async def torbox_search(
     request: Request,
     q: str = Query(..., description="Movie or series title to search for"),
+    tmdb_id: Optional[str] = Query(None, description="TMDB ID for Torrentio lookup"),
 ):
     """
-    Search for torrent variants by title.
+    Search for torrent variants by title using Torrentio and/or Jackett.
 
-    Currently returns empty results — Jackett integration is planned.
-    Use ``/torbox/get?magnet=<magnet>`` to resolve a known magnet directly.
+    - When ``tmdb_id`` is supplied, queries the Torrentio public API first.
+    - When ``JACKETT_URL`` + ``JACKETT_API_KEY`` env vars are set, also queries Jackett.
+    - Returns up to the best 20 results sorted by quality → seeders.
 
-    Returns ``{ results: [], message: str, query: str }``.
+    Returns ``{ results: [...], query: str }``.
+    Each result: ``{ id, label, quality, seeders, size_mb, magnet }``.
     """
     if not q.strip():
-        return {"results": [], "message": "Empty query", "query": q}
+        return {"results": [], "query": q}
 
-    logger.info("torbox_search query=%s", q)
+    logger.info("torbox_search query=%s tmdb_id=%s", q, tmdb_id)
 
-    # TODO: integrate Jackett / other indexers here
+    providers = [TorrentioProvider(), JackettProvider()]
+    all_variants = []
+    for provider in providers:
+        try:
+            results = await provider.search_variants(q, tmdb_id=tmdb_id)
+            all_variants.extend(results)
+        except Exception as exc:
+            logger.warning("torbox_search provider=%s error: %s", provider.name, exc)
+
+    # Sort by quality → seeders (best first) and cap at 20
+    _quality_order = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4}
+    all_variants.sort(
+        key=lambda v: (_quality_order.get(v.quality.lower(), 2), v.seeders),
+        reverse=True,
+    )
+    all_variants = all_variants[:20]
+
     return {
-        "results": [],
-        "message": (
-            "Поиск по торрентам временно недоступен (Jackett в разработке). "
-            "Используйте /torbox/get?magnet=<magnet> для прямой ссылки."
-        ),
+        "results": [v.model_dump() for v in all_variants],
         "query": q,
     }
 

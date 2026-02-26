@@ -7,12 +7,8 @@
     'use strict';
 
     // ── Dedup guard (must be the first thing inside the IIFE) ─────────
-    console.log('[Easy-Mod] loaded v3.1');
-    window.easy_mod_plugin = window.easy_mod_plugin || false;
-    if (window.easy_mod_plugin) {
-        console.log('[Easy-Mod] already loaded, skip');
-        return;
-    }
+    console.log('[Easy-Mod] loaded v3.2');
+    if (window.easy_mod_plugin) { return; }
     window.easy_mod_plugin = true;
 
     var API_URL = 'http://46.225.222.255:8000';
@@ -533,10 +529,16 @@
                         anchor = torrentAnchor.first();
                     }
 
-                    // Fallback: first button in the buttons bar
+                    // Fallback 1: last button inside .full-start__buttons
                     if (!anchor || !anchor.length) {
-                        var firstBtn = find('.full-start__button').eq(0);
-                        if (firstBtn && firstBtn.length) { anchor = firstBtn; }
+                        var btns = find('.full-start__buttons .full-start__button');
+                        if (btns && btns.length) { anchor = btns.last(); }
+                    }
+
+                    // Fallback 2: the buttons container itself (append inside)
+                    if (!anchor || !anchor.length) {
+                        var startContainer = find('.full-start__buttons, .full-start');
+                        if (startContainer && startContainer.length) { anchor = startContainer.first(); }
                     }
 
                     if (!anchor || !anchor.length) { return; } // not ready yet
@@ -575,7 +577,12 @@
                         }
                     });
 
-                    anchor.after(btn);
+                    // Smart insert: append inside a container, after a sibling button
+                    if (anchor.hasClass('full-start__buttons') || anchor.hasClass('full-start')) {
+                        anchor.append(btn);
+                    } else {
+                        anchor.after(btn);
+                    }
                     console.log('[Easy-Mod] button injected for:', (movie && movie.title) || '?');
                 } catch (e) {
                     console.log('[Easy-Mod] ERROR injectButton interval:', e.message);
@@ -598,10 +605,9 @@
 
             Lampa.Listener.follow('full', function (e) {
                 try {
-                    // Only act on the 'complite' sub-event (Lampa 3.1.6 spelling)
-                    if (e && e.type && e.type !== 'complite') { return; }
-
-                    console.log('[Easy-Mod] full complite');
+                    // Log whatever type arrives — do NOT filter by e.type,
+                    // because some Lampa builds omit it or use a different spelling.
+                    console.log('[Easy-Mod] full event type=' + (e && e.type ? e.type : 'unknown'));
 
                     // Resolve the movie object from various event shapes
                     var movie = null;

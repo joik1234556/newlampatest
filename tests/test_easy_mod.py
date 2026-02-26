@@ -1,0 +1,334 @@
+"""Tests for Easy-Mod endpoints: /health, /variants, /stream/start, /stream/status."""
+from __future__ import annotations
+
+import os
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+os.environ.setdefault("TORBOX_API_KEY", "test-key-dummy")
+
+from app.main import app  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+
+# ---------------------------------------------------------------------------
+# /health
+# ---------------------------------------------------------------------------
+
+class TestEasyModHealth:
+    def test_health_ok(self, client):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_health_cors(self, client):
+        resp = client.get("/health", headers={"Origin": "http://lampa.app"})
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
+
+# ---------------------------------------------------------------------------
+# /variants
+# ---------------------------------------------------------------------------
+
+class TestVariants:
+    def test_variants_missing_title(self, client):
+        resp = client.get("/variants")
+        assert resp.status_code == 422  # required query param
+
+    def test_variants_empty_title(self, client):
+        resp = client.get("/variants?title=   ")
+        assert resp.status_code == 400
+
+    def test_variants_returns_structure(self, client):
+        resp = client.get("/variants?title=Дюна+2&year=2024")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "title" in body
+        assert "variants" in body
+        assert isinstance(body["variants"], list)
+
+    def test_variants_contains_required_fields(self, client):
+        resp = client.get("/variants?title=Test+Movie")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        if variants:
+            v = variants[0]
+            assert "id" in v
+            assert "label" in v
+            assert "quality" in v
+            assert "voice" in v
+            assert "magnet" in v
+
+    def test_variants_sorted_by_quality(self, client):
+        resp = client.get("/variants?title=Test+Movie")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        quality_order = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k": 4}
+        if len(variants) >= 2:
+            q0 = quality_order.get(variants[0]["quality"].lower(), 2)
+            q1 = quality_order.get(variants[1]["quality"].lower(), 2)
+            assert q0 >= q1  # descending
+
+    def test_variants_cached(self, client):
+        # Two identical requests — both should succeed (second from cache)
+        r1 = client.get("/variants?title=CacheTest")
+        r2 = client.get("/variants?title=CacheTest")
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json()["variants"] == r2.json()["variants"]
+
+    def test_variants_demo_provider_returns_data(self, client):
+        resp = client.get("/variants?title=Матрица&year=1999")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["variants"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# /stream/start
+# ---------------------------------------------------------------------------
+
+DEMO_MAGNET = (
+    "magnet:?xt=urn:btih:DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
+    "&dn=TestMovie"
+)
+
+
+class TestStreamStart:
+    def test_start_missing_body(self, client):
+        resp = client.post("/stream/start")
+        assert resp.status_code == 422
+
+    def test_start_invalid_magnet(self, client):
+        resp = client.post(
+            "/stream/start",
+            json={"variant_id": "abc", "magnet": "not-a-magnet", "title": "Test"},
+        )
+        assert resp.status_code == 400
+
+    def test_start_missing_variant_id(self, client):
+        resp = client.post(
+            "/stream/start",
+            json={"variant_id": "", "magnet": DEMO_MAGNET, "title": "Test"},
+        )
+        assert resp.status_code == 400
+
+    def test_start_creates_job(self, client):
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "1"}}
+            resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v1", "magnet": DEMO_MAGNET, "title": "Dune 2"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "job_id" in body
+        assert body["status"] in ("queued", "ready")
+
+    def test_start_returns_immediately_if_cached(self, client):
+        # Prime direct_url cache (using infohash as legacy key)
+        from app.cache import direct_url_cache
+        direct_url_cache.set(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "https://cdn.torbox.app/cached.mkv",
+        )
+        resp = client.post(
+            "/stream/start",
+            json={"variant_id": "v_cached", "magnet": DEMO_MAGNET, "title": "Cached"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        # New: direct_url must be included in /stream/start when status=ready
+        assert body.get("direct_url") == "https://cdn.torbox.app/cached.mkv"
+
+    def test_start_dedup_same_magnet_returns_same_job(self, client):
+        """Submitting the same magnet twice should reuse the in-flight job."""
+        UNIQUE_MAGNET = (
+            "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "&dn=DedupeTest"
+        )
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "555"}}
+            r1 = client.post(
+                "/stream/start",
+                json={"variant_id": "vd1", "magnet": UNIQUE_MAGNET, "title": "Dedup"},
+            )
+            r2 = client.post(
+                "/stream/start",
+                json={"variant_id": "vd2", "magnet": UNIQUE_MAGNET, "title": "Dedup"},
+            )
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        # Second request must return the same job_id
+        assert r1.json()["job_id"] == r2.json()["job_id"]
+
+
+# ---------------------------------------------------------------------------
+# /stream/status
+# ---------------------------------------------------------------------------
+
+class TestStreamStatus:
+    def test_status_missing_job_id(self, client):
+        resp = client.get("/stream/status")
+        assert resp.status_code == 422
+
+    def test_status_unknown_job_id(self, client):
+        resp = client.get("/stream/status?job_id=does-not-exist")
+        assert resp.status_code == 404
+
+    def test_status_returns_job(self, client):
+        # Create a job first
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "99"}}
+            start_resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_status", "magnet": DEMO_MAGNET, "title": "StatusTest"},
+            )
+        job_id = start_resp.json()["job_id"]
+
+        resp = client.get(f"/stream/status?job_id={job_id}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_id"] == job_id
+        assert body["state"] in ("queued", "preparing", "ready", "failed")
+        assert 0.0 <= body["progress"] <= 1.0
+
+    def test_status_ready_has_direct_url(self, client):
+        # Force a ready job via cache
+        from app.cache import direct_url_cache
+        direct_url_cache.set(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "https://cdn.torbox.app/ready.mkv",
+        )
+        start_resp = client.post(
+            "/stream/start",
+            json={"variant_id": "v_ready", "magnet": DEMO_MAGNET, "title": "ReadyTest"},
+        )
+        job_id = start_resp.json()["job_id"]
+        status_resp = client.get(f"/stream/status?job_id={job_id}")
+        body = status_resp.json()
+        assert body["state"] == "ready"
+        assert body["direct_url"] == "https://cdn.torbox.app/ready.mkv"
+
+
+# ---------------------------------------------------------------------------
+# Cache unit tests
+# ---------------------------------------------------------------------------
+
+class TestTTLCache:
+    def test_set_and_get(self):
+        from app.cache import TTLCache
+        c = TTLCache(default_ttl=60)
+        c.set("k", "v")
+        assert c.get("k") == "v"
+
+    def test_expiry(self):
+        import time
+        from app.cache import TTLCache
+        c = TTLCache(default_ttl=0)
+        c.set("k", "v", ttl=0)
+        time.sleep(0.01)
+        assert c.get("k") is None
+
+    def test_delete(self):
+        from app.cache import TTLCache
+        c = TTLCache()
+        c.set("k", "v")
+        c.delete("k")
+        assert c.get("k") is None
+
+    def test_miss_returns_none(self):
+        from app.cache import TTLCache
+        c = TTLCache()
+        assert c.get("nonexistent") is None
+
+
+class TestCacheBackend:
+    """Verify CacheBackend sync interface works without Redis."""
+
+    def test_sync_set_get(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test", default_ttl=60)
+        cb.set("key1", "value1")
+        assert cb.get("key1") == "value1"
+
+    def test_sync_delete(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test2", default_ttl=60)
+        cb.set("k", "v")
+        cb.delete("k")
+        assert cb.get("k") is None
+
+    def test_sync_miss(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test3", default_ttl=60)
+        assert cb.get("missing") is None
+
+    def test_async_fallback_to_memory(self):
+        """Async aget/aset fall back to in-memory when Redis is unavailable."""
+        import asyncio
+        from app.cache import CacheBackend
+
+        async def run():
+            cb = CacheBackend(prefix="testasync", default_ttl=60)
+            await cb.aset("hello", "world")
+            val = await cb.aget("hello")
+            return val
+
+        val = asyncio.get_event_loop().run_until_complete(run())
+        assert val == "world"
+
+    def test_async_dict_roundtrip(self):
+        """Dicts serialise and deserialise correctly."""
+        import asyncio
+        from app.cache import CacheBackend
+
+        async def run():
+            cb = CacheBackend(prefix="testdict", default_ttl=60)
+            data = {"foo": "bar", "n": 42}
+            await cb.aset("d", data)
+            return await cb.aget("d")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == {"foo": "bar", "n": 42}
+
+    def test_singletons_exist(self):
+        from app.cache import direct_url_cache, job_cache, magnet_job_cache, variants_cache
+        from app.cache import CacheBackend
+        for cache in (variants_cache, direct_url_cache, job_cache, magnet_job_cache):
+            assert isinstance(cache, CacheBackend)
+
+
+# ---------------------------------------------------------------------------
+# Variants service unit tests
+# ---------------------------------------------------------------------------
+
+class TestVariantsService:
+    def test_quality_sorting(self):
+        from app.services.variants import _quality_rank
+        assert _quality_rank("2160p") > _quality_rank("1080p")
+        assert _quality_rank("1080p") > _quality_rank("720p")
+        assert _quality_rank("720p")  > _quality_rank("480p")
+
+    def test_demo_provider_returns_variants(self):
+        import asyncio
+        from app.providers.demo_provider import DemoProvider
+
+        async def run():
+            p = DemoProvider()
+            return await p.search_variants("Matrix", year=1999)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) > 0
+        for v in variants:
+            assert v.id
+            assert v.label
+            assert v.magnet.startswith("magnet:")

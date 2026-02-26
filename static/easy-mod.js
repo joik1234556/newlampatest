@@ -1,13 +1,13 @@
 /**
  * Easy-Mod — прямые стримы через TorBox для Lampa 3.1.6
- * Версия: 3.0
+ * Версия: 3.1
  * Backend: http://46.225.222.255:8000
  */
 (function () {
     'use strict';
 
     // ── Dedup guard (must be the first thing inside the IIFE) ─────────
-    console.log('[Easy-Mod] loaded v3.0');
+    console.log('[Easy-Mod] loaded v3.1');
     window.easy_mod_plugin = window.easy_mod_plugin || false;
     if (window.easy_mod_plugin) {
         console.log('[Easy-Mod] already loaded, skip');
@@ -504,7 +504,8 @@
     // ─────────────────────────────────────────────────────────────────
     // Button injection — setInterval strategy, max 50 tries (~15 s)
     // ─────────────────────────────────────────────────────────────────
-    function injectButton(movie) {
+    // render — jQuery object from e.object.activity.render() (may be null/undefined)
+    function injectButton(movie, render) {
         try {
             var tries      = 0;
             var maxTries   = 50;
@@ -519,24 +520,29 @@
                     }
 
                     // ── Find the anchor to insert AFTER ────────────
+                    // Prefer scoped search via activity render; fall back to global jQuery.
+                    var find = (render && typeof render.find === 'function')
+                        ? function (sel) { return render.find(sel); }
+                        : function (sel) { return $(sel); };
+
                     var anchor = null;
 
                     // Primary: the TorBox-style button already on page
-                    var torrentAnchor = $('.view--torrent');
-                    if (torrentAnchor.length) {
+                    var torrentAnchor = find('.view--torrent');
+                    if (torrentAnchor && torrentAnchor.length) {
                         anchor = torrentAnchor.first();
                     }
 
                     // Fallback: first button in the buttons bar
                     if (!anchor || !anchor.length) {
-                        var firstBtn = $('.full-start__buttons .full-start__button:first-child');
-                        if (firstBtn.length) { anchor = firstBtn; }
+                        var firstBtn = find('.full-start__button').eq(0);
+                        if (firstBtn && firstBtn.length) { anchor = firstBtn; }
                     }
 
                     if (!anchor || !anchor.length) { return; } // not ready yet
 
                     // Already injected?
-                    if ($('.easy-mod-btn').length) {
+                    if (find('.easy-mod-btn').length) {
                         clearInterval(interval);
                         return;
                     }
@@ -612,7 +618,18 @@
                     }
 
                     console.log('[Easy-Mod] full complite movie:', movie.title || movie.name || '?');
-                    injectButton(movie);
+
+                    // Resolve the scoped render (jQuery object for this activity's DOM)
+                    var render = null;
+                    try {
+                        if (e.object && e.object.activity && typeof e.object.activity.render === 'function') {
+                            render = e.object.activity.render();
+                        }
+                    } catch (re) {
+                        console.log('[Easy-Mod] WARNING: cannot get activity.render():', re.message);
+                    }
+
+                    injectButton(movie, render);
                 } catch (err) {
                     console.log('[Easy-Mod] ERROR full handler:', err.message);
                 }
@@ -641,6 +658,13 @@
     // ─────────────────────────────────────────────────────────────────
     // Boot — wait for Lampa global
     // ─────────────────────────────────────────────────────────────────
+    var _initDone = false;
+    function safeInit() {
+        if (_initDone) { return; }
+        _initDone = true;
+        init();
+    }
+
     function boot() {
         try {
             if (typeof Lampa === 'undefined') {
@@ -655,7 +679,7 @@
                 Lampa.Listener.follow('ready', function () {
                     try {
                         console.log('[Easy-Mod] Lampa ready received');
-                        init();
+                        safeInit();
                     } catch (e) {
                         console.log('[Easy-Mod] ERROR ready handler:', e.message);
                     }
@@ -663,7 +687,7 @@
             }
 
             // Also call immediately in case 'ready' already fired
-            init();
+            safeInit();
 
             console.log('[Easy-Mod] boot() complete');
         } catch (e) {

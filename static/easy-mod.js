@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.9');
+    console.log('[Easy-Mod] loaded v4.10');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -410,8 +410,6 @@
     EasyModVariants.prototype.pause   = function () {};
     EasyModVariants.prototype.stop    = function () {};
 
-    EasyModVariants.create = function (object) { return new EasyModVariants(object); };
-
     EasyModVariants.prototype.destroy = function () {
         this._dead = true;
         try { if (this._req) { this._req.clear(); } } catch (e) {}
@@ -551,8 +549,6 @@
 
     EasyModWait.prototype.pause   = function () {};
     EasyModWait.prototype.stop    = function () {};
-
-    EasyModWait.create = function (object) { return new EasyModWait(object); };
 
     EasyModWait.prototype.destroy = function () {
         this._dead = true;
@@ -707,6 +703,23 @@
     // ==================================================================
     // Register Lampa components
     // ==================================================================
+
+    // makeHybrid wraps Ctor so that BOTH calling conventions work:
+    //   new Hybrid(object)     — used by some Lampa builds
+    //   Hybrid.create(object)  — used by Web Lampa (lampa.mx)
+    // When `new Hybrid(object)` is called, returning a non-primitive from a
+    // constructor makes JS use that value as the result of `new`, so the
+    // caller receives a real Ctor instance either way.
+    function makeHybrid(Ctor) {
+        function Hybrid(object) {
+            return new Ctor(object);
+        }
+        Hybrid.create = function (object) {
+            return new Ctor(object);
+        };
+        return Hybrid;
+    }
+
     function registerComponents() {
         try {
             if (typeof Lampa === 'undefined' || !Lampa.Component) {
@@ -715,33 +728,24 @@
             }
 
             function reg(name, Ctor) {
-                // 1) Two-arg constructor form: Web Lampa calls new Ctor(object)
-                try {
-                    if (typeof Lampa.Component.add === 'function') {
-                        Lampa.Component.add(name, Ctor);
-                        log('registered (constructor)', name);
+                var Hybrid = makeHybrid(Ctor);
+                if (typeof Lampa.Component.add === 'function') {
+                    try {
+                        Lampa.Component.add(name, Hybrid);
+                        log('registered (hybrid)', name);
                         return true;
+                    } catch (e) {
+                        log('hybrid register failed', name, e.message);
                     }
-                } catch (e) {
-                    log('constructor register failed', name, e.message);
                 }
-
-                // 2) Factory fallback: { create(object) { return new Ctor(object); } }
+                // last-resort direct assign
                 try {
-                    Lampa.Component.add(name, { create: function (object) { return new Ctor(object); } });
-                    log('registered (factory.create)', name);
+                    Lampa.Component = Lampa.Component || {};
+                    Lampa.Component[name] = Hybrid;
+                    log('registered (hybrid direct)', name);
                     return true;
                 } catch (e2) {
-                    log('factory register failed', name, e2.message);
-                }
-
-                // 3) Direct assign fallback
-                try {
-                    Lampa.Component[name] = Ctor;
-                    log('registered (direct)', name);
-                    return true;
-                } catch (e3) {
-                    log('direct register failed', name, e3.message);
+                    log('register failed', name, e2.message);
                     return false;
                 }
             }

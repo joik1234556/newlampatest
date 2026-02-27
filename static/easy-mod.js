@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.13');
+    console.log('[Easy-Mod] loaded v4.14');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -543,55 +543,51 @@
     };
 
     // ==================================================================
-    // Button injection into film detail page (modss-style + rAF retry)
+    // Button injection into film detail page (modss-style)
     // ==================================================================
-    function resolveRender(e) {
-        var r = null;
+    function getFullActivityRoot() {
         try {
-            if (e.object && typeof e.object.render === 'function') {
-                r = e.object.render();
-            }
+            var a = Lampa.Activity.active();
+            if (a && a.activity && typeof a.activity.render === 'function') return a.activity.render();
         } catch (ex) {}
-        if (!r || !r.find) {
-            try {
-                if (e.object && e.object.activity && typeof e.object.activity.render === 'function') {
-                    r = e.object.activity.render();
-                }
-            } catch (ex) {}
-        }
-        if (!r || !r.find) {
-            r = jq('body');
-        }
-        return r;
+        return jq('body');
     }
 
     // Returns true if button is already present or was successfully injected.
-    // Returns false if the bar is not yet in the DOM (caller should retry).
-    function injectEasyButton(e) {
-        var render = resolveRender(e);
+    // Returns false if the container is not yet in the DOM (caller should retry).
+    function injectEasyButtonModssStyle() {
+        var activity = getFullActivityRoot();
+        if (!activity || !activity.find) return false;
 
-        var bar = render.find('.full-start__buttons');
-        if (!bar.length) {
-            log('inject btn fail — bar not found');
+        // Dedup guard — use view--easy_mod class
+        if (activity.find('.view--easy_mod').length) return true;
+
+        // Find buttons container (new layout first, then classic)
+        var container = activity.find('.full-start-new__buttons').first();
+        if (!container.length) container = activity.find('.full-start__buttons').first();
+        if (!container.length) {
+            log('inject btn fail — container not found');
             return false;
         }
 
-        // Dedup guard
-        if (bar.find('.easy-mod-btn').length) {
-            return true;
-        }
+        // Resolve movie data from active Activity
+        var m = {};
+        try {
+            var act = Lampa.Activity.active();
+            m = (act && (act.movie || act.card || act.data)) || {};
+        } catch (ex) {}
 
-        var movie =
-            (e.data  && e.data.movie)    ? e.data.movie   :
-            (e.object && e.object.movie) ? e.object.movie :
-            (e.object && e.object.card)  ? e.object.card  :
-            {};
-
-        var btn = jq('<div class="full-start__button selector easy-mod-btn">')
+        var btn = jq('<div class="full-start__button selector view--easy_mod">')
             .append(jq('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'))
             .append(jq('<span>').text('Easy-Mod'));
 
         btn.on('hover:enter click', function () {
+            // Refresh movie data at click time
+            var movie = m;
+            try {
+                var actData = Lampa.Activity.data && Lampa.Activity.data();
+                if (actData && (actData.movie || actData.card)) movie = actData.movie || actData.card;
+            } catch (ex) {}
             log('open variants for', (movie && (movie.title || movie.name)) || '?');
             try {
                 Lampa.Activity.push({
@@ -605,13 +601,23 @@
             }
         });
 
-        var watchBtn = bar.find('.full-start__button').first();
-        if (watchBtn.length) {
-            watchBtn.before(btn);
-            log('inject btn ok — near watch');
+        // Insert left of Watch button (modss-style priority order)
+        var torrentBtn  = activity.find('.view--torrent').first();
+        var playBtn     = activity.find('.button--play').first();
+        var firstFullBtn = activity.find('.full-start__button').first();
+
+        if (torrentBtn.length) {
+            torrentBtn.before(btn);
+            log('inject btn ok — before torrent');
+        } else if (playBtn.length) {
+            playBtn.before(btn);
+            log('inject btn ok — before play');
+        } else if (firstFullBtn.length) {
+            firstFullBtn.before(btn);
+            log('inject btn ok — before first btn');
         } else {
-            bar.prepend(btn);
-            log('inject btn ok — prepended (watch btn not found)');
+            container.prepend(btn);
+            log('inject btn ok — prepended');
         }
         return true;
     }
@@ -625,15 +631,12 @@
                 try {
                     log('full event fired type=' + (e && e.type));
                     if (e && e.type && e.type !== 'complite' && e.type !== 'start') { return; }
-                    var ok = injectEasyButton(e);
-                    if (!ok) {
-                        // DOM may not be ready yet — retry on next two animation frames
-                        requestAnimationFrame(function () {
-                            if (!injectEasyButton(e)) {
-                                requestAnimationFrame(function () { injectEasyButton(e); });
-                            }
-                        });
-                    }
+                    // DOM renders slightly after the event — use setTimeout like modss
+                    setTimeout(function () {
+                        if (!injectEasyButtonModssStyle()) {
+                            setTimeout(injectEasyButtonModssStyle, 250);
+                        }
+                    }, 100);
                 } catch (err) {
                     log('full listener error', err.message);
                 }

@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.11');
+    console.log('[Easy-Mod] loaded v4.12');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -560,98 +560,59 @@
     };
 
     // ==================================================================
-    // Button injection into film detail page
+    // Button injection into film detail page (modss-style)
     // ==================================================================
-    function injectButton(movie, render) {
-        var tries   = 0;
-        var maxTries = 60; // × 300 ms ≈ 18 s
-
-        var timer = setInterval(function () {
-            tries++;
-
-            // safety: if render disappeared, abort
-            if (!jq) { clearInterval(timer); return; }
-
-            try {
-                var find = (render && render.find) ?
-                    function (s) { return render.find(s); } :
-                    function (s) { return jq(s);           };
-
-                // already injected?
-                if (find('.easy-mod-btn').length) {
-                    clearInterval(timer);
-                    return;
-                }
-
-                // Candidate anchors (in priority order):
-                // 1. .view--torrent          — torrent button
-                // 2. last .full-start__button — any action button
-                // 3. .full-start__buttons     — the bar itself (append)
-                // 4. .full-start              — whole block (append)
-                var anchor   = null;
-                var appendMode = false;
-
-                var torrentBtn = find('.view--torrent');
-                if (torrentBtn.length) {
-                    anchor = torrentBtn.first();
-                }
-
-                if (!anchor || !anchor.length) {
-                    var btns = find('.full-start__button');
-                    if (btns.length) { anchor = btns.last(); }
-                }
-
-                if (!anchor || !anchor.length) {
-                    var bar = find('.full-start__buttons');
-                    if (bar.length) { anchor = bar.first(); appendMode = true; }
-                }
-
-                if (!anchor || !anchor.length) {
-                    var block = find('.full-start');
-                    if (block.length) { anchor = block.first(); appendMode = true; }
-                }
-
-                if (!anchor || !anchor.length) {
-                    if (tries >= maxTries) {
-                        clearInterval(timer);
-                        log('inject: timeout — no anchor found');
-                    }
-                    return; // DOM not ready yet
-                }
-
-                clearInterval(timer);
-
-                var btn = jq('<div class="full-start__button selector easy-mod-btn">')
-                    .append(jq('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'))
-                    .append(jq('<span>').text('Easy-Mod'));
-
-                btn.on('hover:enter click', function () {
-                    log('open variants for', (movie && (movie.title || movie.name)) || '?');
-                    try { Lampa.Noty.show('[Easy-Mod] click'); } catch (e) {}
-                    try {
-                        Lampa.Activity.push({
-                            component: 'easy_mod_variants',
-                            title:     'Easy-Mod',
-                            movie:     movie
-                        });
-                    } catch (e) {
-                        try { Lampa.Noty.show('[Easy-Mod] Activity.push error: ' + (e && e.message)); } catch (e2) {}
-                        log('Activity.push error', e.message);
-                    }
-                });
-
-                if (appendMode) {
-                    anchor.append(btn);
-                } else {
-                    anchor.after(btn);
-                }
-
-                log('button injected for', (movie && (movie.title || movie.name)) || '?');
-            } catch (e) {
-                log('inject interval error', e.message);
-                if (tries >= maxTries) { clearInterval(timer); }
+    function injectEasyButton(e) {
+        // Resolve render element from the event object (modss pattern)
+        var render = null;
+        try {
+            if (e.object && typeof e.object.render === 'function') {
+                render = e.object.render();
+            } else if (e.object && e.object.activity && typeof e.object.activity.render === 'function') {
+                render = e.object.activity.render();
             }
-        }, 300);
+        } catch (ex) {
+            log('render resolve error', ex.message);
+        }
+        if (!render || !render.find) { return; }
+
+        var bar = render.find('.full-start__buttons');
+        if (!bar.length) { return; }
+
+        // Dedup guard
+        if (bar.find('.easy-mod-btn').length) { return; }
+
+        var movie =
+            (e.data  && e.data.movie)    ? e.data.movie   :
+            (e.object && e.object.movie) ? e.object.movie :
+            (e.object && e.object.card)  ? e.object.card  :
+            {};
+
+        var btn = jq('<div class="full-start__button selector easy-mod-btn">')
+            .append(jq('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'))
+            .append(jq('<span>').text('Easy-Mod'));
+
+        btn.on('hover:enter click', function () {
+            log('open variants for', (movie && (movie.title || movie.name)) || '?');
+            try {
+                Lampa.Activity.push({
+                    component: 'easy_mod_variants',
+                    title:     'Easy-Mod',
+                    movie:     movie
+                });
+            } catch (err) {
+                log('Activity.push error', err.message);
+            }
+        });
+
+        var watchBtn = bar.find('.full-start__button').first();
+        if (watchBtn.length) {
+            watchBtn.before(btn);
+            log('button injected near watch');
+        } else {
+            bar.prepend(btn);
+            log('watch btn not found, prepended');
+        }
     }
 
     // ==================================================================
@@ -661,39 +622,11 @@
         try {
             Lampa.Listener.follow('full', function (e) {
                 try {
-                    log('full event type=' + (e && e.type));
-
-                    var movie =
-                        (e && e.data  && e.data.movie)   ? e.data.movie   :
-                        (e && e.object && e.object.movie) ? e.object.movie :
-                        (e && e.object && e.object.card)  ? e.object.card  :
-                        null;
-
-                    // Web Lampa often omits movie in the event; try Activity as fallback
-                    if (!movie) {
-                        try {
-                            var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
-                            if (act) { movie = act.movie || act.card || null; }
-                        } catch (ex) {}
-                    }
-
-                    if (!movie) {
-                        log('full event: no movie data, skipping');
-                        return;
-                    }
-
-                    var render = null;
-                    try {
-                        if (e.object && e.object.activity && e.object.activity.render) {
-                            render = e.object.activity.render();
-                        }
-                    } catch (ex) {
-                        log('render resolve error', ex.message);
-                    }
-
-                    injectButton(movie, render);
-                } catch (e) {
-                    log('full listener error', e.message);
+                    log('full event fired type=' + (e && e.type));
+                    if (e && e.type && e.type !== 'complite') { return; }
+                    injectEasyButton(e);
+                } catch (err) {
+                    log('full listener error', err.message);
                 }
             });
             log('full listener registered');

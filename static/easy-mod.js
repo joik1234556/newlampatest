@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.12');
+    console.log('[Easy-Mod] loaded v4.13');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -133,27 +133,6 @@
     }
 
     function netPost(url, body, ok, fail) {
-        var req = makeRequest();
-        if (req && req.silent) {
-            log('netPost via Lampa.Request', url);
-            try {
-                req.silent(url, function (raw) {
-                    try {
-                        var json = (typeof raw === 'string') ? JSON.parse(raw) : raw;
-                        if (ok) { ok(json); }
-                    } catch (e) {
-                        log('netPost Lampa parse error', e.message);
-                        if (fail) { fail('json parse error'); }
-                    }
-                }, function (err) {
-                    log('netPost Lampa error', err, '— falling back to fetch/XHR');
-                    netPostFallback(url, body, ok, fail);
-                }, body);
-                return;
-            } catch (e) {
-                log('netPost Lampa exception', e.message, '— falling back');
-            }
-        }
         netPostFallback(url, body, ok, fail);
     }
 
@@ -362,13 +341,17 @@
         var body  = {
             variant_id: variant.id || '',
             magnet:     variant.magnet || '',
-            title:      title
+            title:      title,
+            year:       m.year || '',
+            tmdb_id:    m.id   || ''
         };
 
+        log('startStream payload=' + JSON.stringify(body));
         self._render.html('<div class="online-empty">Запуск потока…</div>');
 
         apiPost('/stream/start', body, function (resp) {
             if (self._dead) { return; }
+            log('startStream response=' + JSON.stringify(resp));
             try {
                 var jobId = resp && (resp.job_id || resp.id);
                 var status = resp && resp.status;
@@ -560,27 +543,43 @@
     };
 
     // ==================================================================
-    // Button injection into film detail page (modss-style)
+    // Button injection into film detail page (modss-style + rAF retry)
     // ==================================================================
-    function injectEasyButton(e) {
-        // Resolve render element from the event object (modss pattern)
-        var render = null;
+    function resolveRender(e) {
+        var r = null;
         try {
             if (e.object && typeof e.object.render === 'function') {
-                render = e.object.render();
-            } else if (e.object && e.object.activity && typeof e.object.activity.render === 'function') {
-                render = e.object.activity.render();
+                r = e.object.render();
             }
-        } catch (ex) {
-            log('render resolve error', ex.message);
+        } catch (ex) {}
+        if (!r || !r.find) {
+            try {
+                if (e.object && e.object.activity && typeof e.object.activity.render === 'function') {
+                    r = e.object.activity.render();
+                }
+            } catch (ex) {}
         }
-        if (!render || !render.find) { return; }
+        if (!r || !r.find) {
+            r = jq('body');
+        }
+        return r;
+    }
+
+    // Returns true if button is already present or was successfully injected.
+    // Returns false if the bar is not yet in the DOM (caller should retry).
+    function injectEasyButton(e) {
+        var render = resolveRender(e);
 
         var bar = render.find('.full-start__buttons');
-        if (!bar.length) { return; }
+        if (!bar.length) {
+            log('inject btn fail — bar not found');
+            return false;
+        }
 
         // Dedup guard
-        if (bar.find('.easy-mod-btn').length) { return; }
+        if (bar.find('.easy-mod-btn').length) {
+            return true;
+        }
 
         var movie =
             (e.data  && e.data.movie)    ? e.data.movie   :
@@ -598,7 +597,8 @@
                 Lampa.Activity.push({
                     component: 'easy_mod_variants',
                     title:     'Easy-Mod',
-                    movie:     movie
+                    movie:     movie,
+                    page:      1
                 });
             } catch (err) {
                 log('Activity.push error', err.message);
@@ -608,11 +608,12 @@
         var watchBtn = bar.find('.full-start__button').first();
         if (watchBtn.length) {
             watchBtn.before(btn);
-            log('button injected near watch');
+            log('inject btn ok — near watch');
         } else {
             bar.prepend(btn);
-            log('watch btn not found, prepended');
+            log('inject btn ok — prepended (watch btn not found)');
         }
+        return true;
     }
 
     // ==================================================================
@@ -623,8 +624,16 @@
             Lampa.Listener.follow('full', function (e) {
                 try {
                     log('full event fired type=' + (e && e.type));
-                    if (e && e.type && e.type !== 'complite') { return; }
-                    injectEasyButton(e);
+                    if (e && e.type && e.type !== 'complite' && e.type !== 'start') { return; }
+                    var ok = injectEasyButton(e);
+                    if (!ok) {
+                        // DOM may not be ready yet — retry on next two animation frames
+                        requestAnimationFrame(function () {
+                            if (!injectEasyButton(e)) {
+                                requestAnimationFrame(function () { injectEasyButton(e); });
+                            }
+                        });
+                    }
                 } catch (err) {
                     log('full listener error', err.message);
                 }

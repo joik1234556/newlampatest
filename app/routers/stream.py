@@ -34,8 +34,8 @@ async def stream_start(
         raise HTTPException(status_code=400, detail="variant_id is required")
 
     logger.info(
-        "[Easy-Mod][/stream/start] variant_id=%s title=%s",
-        body.variant_id, body.title,
+        "[Easy-Mod][/stream/start] variant_id=%s title=%s magnet=%.60s",
+        body.variant_id, body.title, body.magnet,
     )
 
     try:

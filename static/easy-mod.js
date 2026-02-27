@@ -671,20 +671,25 @@
                 return;
             }
 
-            // Web Lampa requires factory object with create()
-            Lampa.Component.add('easy_mod_variants', {
-                create: function (object) {
-                    return new EasyModVariants(object);
-                }
-            });
+            // Web Lampa internal registry
+            if (Lampa.Component.components3) {
+                Lampa.Component.components3['easy_mod_variants'] = EasyModVariants;
+                Lampa.Component.components3['easy_mod_wait'] = EasyModWait;
 
-            Lampa.Component.add('easy_mod_wait', {
-                create: function (object) {
-                    return new EasyModWait(object);
-                }
-            });
+                console.log('[Easy-Mod] registered via components3');
+            } else if (Lampa.Component.components) {
+                Lampa.Component.components['easy_mod_variants'] = EasyModVariants;
+                Lampa.Component.components['easy_mod_wait'] = EasyModWait;
 
-            console.log('[Easy-Mod] components registered (factory.create)');
+                console.log('[Easy-Mod] registered via components');
+            } else {
+                // fallback
+                Lampa.Component.add('easy_mod_variants', EasyModVariants);
+                Lampa.Component.add('easy_mod_wait', EasyModWait);
+
+                console.log('[Easy-Mod] registered via Component.add fallback');
+            }
+
         } catch (e) {
             console.log('[Easy-Mod] register error', e);
         }

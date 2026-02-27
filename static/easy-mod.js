@@ -668,24 +668,48 @@
     // ==================================================================
     function registerComponents() {
         try {
-            if (typeof Lampa === 'undefined' || !Lampa.Component || !Lampa.Component.add) {
-                console.log('[Easy-Mod] Lampa.Component.add not available');
+            if (typeof Lampa === 'undefined' || !Lampa.Component) {
+                log('Lampa.Component not available');
                 return;
             }
 
-            Lampa.Component.add({
-                name: 'easy_mod_variants',
-                component: EasyModVariants
-            });
+            function reg(name, Ctor) {
+                // 1) Two-arg constructor form: Web Lampa calls new Ctor(object)
+                try {
+                    if (typeof Lampa.Component.add === 'function') {
+                        Lampa.Component.add(name, Ctor);
+                        log('registered (constructor)', name);
+                        return true;
+                    }
+                } catch (e) {
+                    log('constructor register failed', name, e.message);
+                }
 
-            Lampa.Component.add({
-                name: 'easy_mod_wait',
-                component: EasyModWait
-            });
+                // 2) Factory fallback: { create(object) { return new Ctor(object); } }
+                try {
+                    Lampa.Component.add(name, { create: function (object) { return new Ctor(object); } });
+                    log('registered (factory.create)', name);
+                    return true;
+                } catch (e2) {
+                    log('factory register failed', name, e2.message);
+                }
 
-            console.log('[Easy-Mod] registered via Web signature');
+                // 3) Direct assign fallback
+                try {
+                    Lampa.Component[name] = Ctor;
+                    log('registered (direct)', name);
+                    return true;
+                } catch (e3) {
+                    log('direct register failed', name, e3.message);
+                    return false;
+                }
+            }
+
+            reg('easy_mod_variants', EasyModVariants);
+            reg('easy_mod_wait', EasyModWait);
+
         } catch (e) {
-            console.log('[Easy-Mod] register error', e);
+            log('registerComponents fatal', e.message);
         }
     }
 

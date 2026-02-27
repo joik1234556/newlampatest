@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.0');
+    console.log('[Easy-Mod] loaded v4.1');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -20,12 +20,12 @@
     // -----------------------------------------------------------------
     var jq = window.jQuery || window.$ || (typeof Lampa !== 'undefined' && Lampa.$) || null;
 
+    function noop() { return this; }
+
     function $(sel, ctx) {
         if (!jq) { return { length: 0, append: noop, after: noop, on: noop, find: function () { return $(sel); }, hasClass: noop, text: noop, html: noop, empty: noop, remove: noop, first: noop, last: noop, eq: noop }; }
         return ctx ? jq(sel, ctx) : jq(sel);
     }
-
-    function noop() { return this; }
 
     // -----------------------------------------------------------------
     // Logging helper
@@ -552,12 +552,16 @@
     // ==================================================================
     function registerComponents() {
         try {
-            if (typeof Lampa !== 'undefined' && Lampa.Component && Lampa.Component.add) {
+            if (typeof Lampa !== 'undefined' && Lampa.Activity && Lampa.Activity.add) {
+                Lampa.Activity.add('easy_mod_variants', EasyModVariants);
+                Lampa.Activity.add('easy_mod_wait',     EasyModWait);
+                log('components registered via Lampa.Activity.add');
+            } else if (typeof Lampa !== 'undefined' && Lampa.Component && Lampa.Component.add) {
                 Lampa.Component.add('easy_mod_variants', EasyModVariants);
                 Lampa.Component.add('easy_mod_wait',     EasyModWait);
-                log('components registered (easy_mod_variants, easy_mod_wait)');
+                log('components registered via Lampa.Component.add (fallback)');
             } else {
-                log('Lampa.Component.add not available — components not registered');
+                log('Lampa.Activity.add and Lampa.Component.add not available — components not registered');
             }
         } catch (e) {
             log('registerComponents error', e.message);

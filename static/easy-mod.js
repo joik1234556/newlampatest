@@ -249,6 +249,7 @@
     EasyModVariants.prototype.render = function () { return this._render; };
 
     EasyModVariants.prototype.start = function () {
+        try { Lampa.Noty.show('[Easy-Mod] variants.start()'); } catch (e) {}
         log('variants start');
         var self  = this;
         var m     = self._movie || {};
@@ -586,7 +587,7 @@
 
                 btn.on('hover:enter click', function () {
                     log('open variants for', (movie && (movie.title || movie.name)) || '?');
-                    try { Lampa.Noty.show('Easy-Mod: click'); } catch (e) {}
+                    try { Lampa.Noty.show('[Easy-Mod] click'); } catch (e) {}
                     try {
                         Lampa.Activity.push({
                             component: 'easy_mod_variants',
@@ -594,6 +595,7 @@
                             movie:     movie
                         });
                     } catch (e) {
+                        try { Lampa.Noty.show('[Easy-Mod] Activity.push error: ' + (e && e.message)); } catch (e2) {}
                         log('Activity.push error', e.message);
                     }
                 });
@@ -657,16 +659,57 @@
     // ==================================================================
     function registerComponents() {
         try {
-            if (typeof Lampa !== 'undefined' && Lampa.Activity && Lampa.Activity.add) {
-                Lampa.Activity.add('easy_mod_variants', EasyModVariants);
-                Lampa.Activity.add('easy_mod_wait',     EasyModWait);
-                log('components registered via Lampa.Activity.add');
-            } else if (typeof Lampa !== 'undefined' && Lampa.Component && Lampa.Component.add) {
-                Lampa.Component.add('easy_mod_variants', EasyModVariants);
-                Lampa.Component.add('easy_mod_wait',     EasyModWait);
-                log('components registered via Lampa.Component.add (fallback)');
-            } else {
-                log('Lampa.Activity.add and Lampa.Component.add not available — components not registered');
+            if (typeof Lampa === 'undefined' || !Lampa.Component) {
+                log('Lampa.Component not available');
+                return;
+            }
+
+            var variantsCtor    = EasyModVariants;
+            var waitCtor        = EasyModWait;
+            var variantsFactory = { create: function (o) { return new EasyModVariants(o); } };
+            var waitFactory     = { create: function (o) { return new EasyModWait(o); } };
+
+            // 1) Try via Lampa.Activity.add (constructor) — some builds use this
+            try {
+                if (typeof Lampa.Activity !== 'undefined' && typeof Lampa.Activity.add === 'function') {
+                    Lampa.Activity.add('easy_mod_variants', variantsCtor);
+                    Lampa.Activity.add('easy_mod_wait',     waitCtor);
+                    log('components registered via Lampa.Activity.add');
+                    return;
+                }
+            } catch (e1) {
+                log('Lampa.Activity.add failed', e1 && e1.message);
+            }
+
+            // 2) Try as constructor via Lampa.Component.add
+            try {
+                if (typeof Lampa.Component.add === 'function') {
+                    Lampa.Component.add('easy_mod_variants', variantsCtor);
+                    Lampa.Component.add('easy_mod_wait',     waitCtor);
+                    log('components registered via Component.add (constructor)');
+                    return;
+                }
+            } catch (e2) {
+                log('Component.add constructor failed', e2 && e2.message);
+            }
+
+            // 3) Try as factory with create() via Lampa.Component.add
+            try {
+                Lampa.Component.add('easy_mod_variants', variantsFactory);
+                Lampa.Component.add('easy_mod_wait',     waitFactory);
+                log('components registered via Component.add (factory.create)');
+                return;
+            } catch (e3) {
+                log('Component.add factory failed', e3 && e3.message);
+            }
+
+            // 4) Fallback: direct assignment on Lampa.Component
+            try {
+                Lampa.Component['easy_mod_variants'] = variantsFactory;
+                Lampa.Component['easy_mod_wait']     = waitFactory;
+                log('components registered via direct assignment');
+            } catch (e4) {
+                log('direct assignment failed', e4 && e4.message);
             }
         } catch (e) {
             log('registerComponents error', e.message);

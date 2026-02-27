@@ -64,11 +64,16 @@
     color: #f44336;
     margin-bottom: 0.6em;
 }
-
 .easy-mod-wait__back {
     display: inline-block;
     padding: 0.4em 1em;
     border-radius: 0.3em;
     cursor: pointer;
     font-size: 0.9em;
+}
+
+.easy-mod-error__hint {
+    margin-top: 0.5em;
+    font-size: 0.85em;
+    opacity: 0.7;
 }

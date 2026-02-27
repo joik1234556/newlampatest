@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -89,9 +90,24 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # ty
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    resp = await call_next(request)
+    ms = int((time.time() - start) * 1000)
+    logger.info("[HTTP] %s %s -> %s (%dms)",
+                request.method,
+                request.url.path + ("?" + request.url.query if request.url.query else ""),
+                resp.status_code, ms)
+    return resp
 
 # ---------------------------------------------------------------------------
 # Easy-Mod routers (variants + stream; health is provided by the legacy

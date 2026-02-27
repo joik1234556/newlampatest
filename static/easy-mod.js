@@ -93,7 +93,7 @@
     function netGetFallback(url, ok, fail) {
         if (typeof fetch !== 'undefined') {
             log('netGet via fetch', url);
-            fetch(url)
+            fetch(url, { mode: 'cors' })
                 .then(function (r) { return r.json(); })
                 .then(function (json) { if (ok) { ok(json); } })
                 .catch(function (e) {
@@ -163,7 +163,8 @@
             fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                mode: 'cors'
             })
                 .then(function (r) { return r.json(); })
                 .then(function (json) { if (ok) { ok(json); } })
@@ -312,7 +313,12 @@
             if (self._dead) { return; }
             log('variants error', err);
             try { Lampa.Noty.show('Easy-Mod: /variants error'); } catch (e) {}
-            self._render.html('<div class="online-empty">Ошибка сервера: ' + (err || '') + '</div>');
+            self._render.html(
+                '<div class="online-empty">' +
+                '<div>Ошибка сервера: ' + (err || '') + '</div>' +
+                '<div class="easy-mod-error__hint">Откройте F12 → Console/Network для деталей</div>' +
+                '</div>'
+            );
         });
     };
 

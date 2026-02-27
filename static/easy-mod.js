@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.10');
+    console.log('[Easy-Mod] loaded v4.11');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -247,6 +247,7 @@
         this._req    = null;
     }
 
+    EasyModVariants.prototype.create = function () { return this._render; };
     EasyModVariants.prototype.render = function () { return this._render; };
 
     EasyModVariants.prototype.start = function () {
@@ -436,6 +437,7 @@
         this._MAX_TICKS    = 75; // ~(15×2 + 60×5) = 330 s ≈ 5.5 min
     }
 
+    EasyModWait.prototype.create = function () { return this._render; };
     EasyModWait.prototype.render = function () { return this._render; };
 
     EasyModWait.prototype.start = function () {
@@ -701,58 +703,18 @@
     }
 
     // ==================================================================
-    // Register Lampa components
+    // Register Lampa components (modss-style: plain constructor)
     // ==================================================================
-
-    // makeHybrid wraps Ctor so that BOTH calling conventions work:
-    //   new Hybrid(object)     — used by some Lampa builds
-    //   Hybrid.create(object)  — used by Web Lampa (lampa.mx)
-    // When `new Hybrid(object)` is called, returning a non-primitive from a
-    // constructor makes JS use that value as the result of `new`, so the
-    // caller receives a real Ctor instance either way.
-    function makeHybrid(Ctor) {
-        function Hybrid(object) {
-            return new Ctor(object);
-        }
-        Hybrid.create = function (object) {
-            return new Ctor(object);
-        };
-        return Hybrid;
-    }
-
     function registerComponents() {
         try {
-            if (typeof Lampa === 'undefined' || !Lampa.Component) {
-                log('Lampa.Component not available');
+            if (typeof Lampa === 'undefined' || !Lampa.Component || typeof Lampa.Component.add !== 'function') {
+                log('Lampa.Component.add not available');
                 return;
             }
-
-            function reg(name, Ctor) {
-                var Hybrid = makeHybrid(Ctor);
-                if (typeof Lampa.Component.add === 'function') {
-                    try {
-                        Lampa.Component.add(name, Hybrid);
-                        log('registered (hybrid)', name);
-                        return true;
-                    } catch (e) {
-                        log('hybrid register failed', name, e.message);
-                    }
-                }
-                // last-resort direct assign
-                try {
-                    Lampa.Component = Lampa.Component || {};
-                    Lampa.Component[name] = Hybrid;
-                    log('registered (hybrid direct)', name);
-                    return true;
-                } catch (e2) {
-                    log('register failed', name, e2.message);
-                    return false;
-                }
-            }
-
-            reg('easy_mod_variants', EasyModVariants);
-            reg('easy_mod_wait', EasyModWait);
-
+            Lampa.Component.add('easy_mod_variants', EasyModVariants);
+            log('registered easy_mod_variants');
+            Lampa.Component.add('easy_mod_wait', EasyModWait);
+            log('registered easy_mod_wait');
         } catch (e) {
             log('registerComponents fatal', e.message);
         }

@@ -667,17 +667,26 @@
     function registerComponents() {
         try {
             if (!Lampa || !Lampa.Component) {
-                log('Lampa.Component not found');
+                console.log('[Easy-Mod] Lampa.Component not found');
                 return;
             }
 
-            // Direct constructor registration (works on Web)
-            Lampa.Component.add('easy_mod_variants', EasyModVariants);
-            Lampa.Component.add('easy_mod_wait',     EasyModWait);
+            // Web Lampa requires factory object with create()
+            Lampa.Component.add('easy_mod_variants', {
+                create: function (object) {
+                    return new EasyModVariants(object);
+                }
+            });
 
-            log('components registered (direct constructor)');
+            Lampa.Component.add('easy_mod_wait', {
+                create: function (object) {
+                    return new EasyModWait(object);
+                }
+            });
+
+            console.log('[Easy-Mod] components registered (factory.create)');
         } catch (e) {
-            log('registerComponents error', e);
+            console.log('[Easy-Mod] register error', e);
         }
     }
 

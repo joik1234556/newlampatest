@@ -551,18 +551,39 @@
     // Register Lampa components
     // ==================================================================
     function registerComponents() {
-        try {
-            if (typeof Lampa !== 'undefined' && Lampa.Component && Lampa.Component.add) {
-                Lampa.Component.add('easy_mod_variants', EasyModVariants);
-                Lampa.Component.add('easy_mod_wait',     EasyModWait);
-                log('components registered (easy_mod_variants, easy_mod_wait)');
-            } else {
-                log('Lampa.Component.add not available — components not registered');
-            }
-        } catch (e) {
-            log('registerComponents error', e.message);
+    try {
+        if (typeof Lampa === 'undefined' || !Lampa.Component) {
+            log('Lampa.Component not available');
+            return;
         }
+
+        // Обёртка под разные сборки Lampa:
+        // где-то ждут "constructor", где-то ждут объект с create()
+        var variantsFactory = {
+            create: function (object) { return new EasyModVariants(object); }
+        };
+
+        var waitFactory = {
+            create: function (object) { return new EasyModWait(object); }
+        };
+
+        if (typeof Lampa.Component.add === 'function') {
+            // Регистрируем как factory с create()
+            Lampa.Component.add('easy_mod_variants', variantsFactory);
+            Lampa.Component.add('easy_mod_wait', waitFactory);
+            log('components registered via Component.add (factory.create)');
+        } else if (typeof Lampa.Component === 'object') {
+            // fallback: прямое присваивание
+            Lampa.Component['easy_mod_variants'] = variantsFactory;
+            Lampa.Component['easy_mod_wait'] = waitFactory;
+            log('components registered directly (factory.create)');
+        } else {
+            log('cannot register components: unknown Lampa.Component shape');
+        }
+    } catch (e) {
+        log('registerComponents error', e.message);
     }
+}
 
     // ==================================================================
     // Bootstrap

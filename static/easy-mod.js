@@ -668,15 +668,24 @@
     // ==================================================================
     function registerComponents() {
         try {
-            if (typeof Lampa !== 'undefined' && Lampa.Component && typeof Lampa.Component.add === 'function') {
-                Lampa.Component.add('easy_mod_variants', EasyModVariants);
-                Lampa.Component.add('easy_mod_wait', EasyModWait);
-                log('components registered via Component.add (constructors)');
-            } else {
-                log('Lampa.Component.add not available');
+            if (typeof Lampa === 'undefined' || !Lampa.Component || !Lampa.Component.add) {
+                console.log('[Easy-Mod] Lampa.Component.add not available');
+                return;
             }
+
+            Lampa.Component.add({
+                name: 'easy_mod_variants',
+                component: EasyModVariants
+            });
+
+            Lampa.Component.add({
+                name: 'easy_mod_wait',
+                component: EasyModWait
+            });
+
+            console.log('[Easy-Mod] registered via Web signature');
         } catch (e) {
-            log('registerComponents error', e.message);
+            console.log('[Easy-Mod] register error', e);
         }
     }
 

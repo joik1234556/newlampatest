@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.1');
+    console.log('[Easy-Mod] loaded v4.9');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -256,9 +256,38 @@
         log('variants start movie=', JSON.stringify(this._movie || {}));
         var self  = this;
         var m     = self._movie || {};
+
+        // Web Lampa fallback: movie may not be in object — try Activity
+        if (!m.title && !m.name && !m.id) {
+            try {
+                var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                if (act) { m = act.movie || act.card || act.data || m; }
+            } catch (ex) {}
+        }
+        if (!m.title && !m.name && !m.id) {
+            try {
+                var actData = Lampa.Activity && Lampa.Activity.data && Lampa.Activity.data();
+                if (actData) { m = actData.movie || actData.card || actData; }
+            } catch (ex) {}
+        }
+        if (!m.title && !m.name && !m.id) {
+            // URL fallback: ?card=TMDB_ID&media=movie&source=tmdb
+            try {
+                var urlStr = window.location.search ||
+                             (window.location.hash ? window.location.hash.replace(/^#\/?/, '?') : '');
+                if (urlStr) {
+                    var urlParams = new URLSearchParams(urlStr);
+                    var cardId = urlParams.get('card') || urlParams.get('tmdb_id');
+                    if (cardId) { m = { id: cardId }; }
+                }
+            } catch (ex) {}
+        }
+
+        log('movie ctx', m);
+
         var title = m.title || m.name || m.original_title || m.original_name || '';
         var year  = m.year || (m.release_date ? m.release_date.slice(0, 4) : '') || '';
-        var tmdb  = m.id || '';
+        var tmdb  = m.id || m.tmdb_id || '';  // some Activity data uses tmdb_id instead of id
 
         self._render.html('<div class="online-empty">Загрузка вариантов…</div>');
 
@@ -380,6 +409,8 @@
 
     EasyModVariants.prototype.pause   = function () {};
     EasyModVariants.prototype.stop    = function () {};
+
+    EasyModVariants.create = function (object) { return new EasyModVariants(object); };
 
     EasyModVariants.prototype.destroy = function () {
         this._dead = true;
@@ -521,6 +552,8 @@
     EasyModWait.prototype.pause   = function () {};
     EasyModWait.prototype.stop    = function () {};
 
+    EasyModWait.create = function (object) { return new EasyModWait(object); };
+
     EasyModWait.prototype.destroy = function () {
         this._dead = true;
         clearTimeout(this._timer);
@@ -637,6 +670,14 @@
                         (e && e.object && e.object.movie) ? e.object.movie :
                         (e && e.object && e.object.card)  ? e.object.card  :
                         null;
+
+                    // Web Lampa often omits movie in the event; try Activity as fallback
+                    if (!movie) {
+                        try {
+                            var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                            if (act) { movie = act.movie || act.card || null; }
+                        } catch (ex) {}
+                    }
 
                     if (!movie) {
                         log('full event: no movie data, skipping');

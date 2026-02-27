@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.15');
+    console.log('[Easy-Mod] loaded v4.16');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -473,7 +473,15 @@
 
                 var msg = 'Подготовка потока…';
                 if (state === 'queued')    { msg = 'В очереди…'; }
-                if (state === 'preparing') { msg = 'Подготовка потока… ' + pct + '%'; }
+                if (state === 'preparing') {
+                    if (pct <= 10) {
+                        msg = 'TorBox обрабатывает запрос… ' + pct + '%';
+                    } else if (pct <= 45) {
+                        msg = 'TorBox загружает торрент… ' + pct + '%';
+                    } else {
+                        msg = 'Загрузка… ' + pct + '%';
+                    }
+                }
                 if (state === 'ready')     { msg = 'Готово! Запускаем…'; }
                 if (state === 'failed')    { msg = 'Ошибка: ' + ((resp && resp.message) || ''); }
 

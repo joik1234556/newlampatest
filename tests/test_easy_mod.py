@@ -209,6 +209,78 @@ class TestStreamStart:
         assert job.state == "failed"
         assert "401" in job.message or "HTTP" in job.message or "TorBox" in job.message
 
+    def test_torbox_dead_state_fails_job_with_message(self):
+        """When TorBox reports a dead state (stalledDL), the job must fail with a helpful message."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+            "&dn=StalledTest"
+        )
+        stalled_torrent = {
+            "id": "777",
+            "download_state": "stalledDL",
+            "progress": 0.0,
+            "files": [],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_stall", magnet=MAGNET, title="StalledTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam, \
+                 patch("app.services.stream.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt, \
+                 patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
+                mam.return_value = {"data": {"torrent_id": "777"}}
+                mgt.return_value = stalled_torrent
+                await _process_job(job.job_id)
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "failed"
+        assert "stalledDL" in job.message or "Torrent" in job.message or "TorBox" in job.message
+
+    def test_early_download_link_on_files_available(self):
+        """Job becomes ready as soon as TorBox reports files (regardless of download_state)."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+            "&dn=EarlyLinkTest"
+        )
+        torrent_with_files = {
+            "id": "888",
+            "download_state": "downloading",
+            "progress": 0.0,
+            "files": [{"id": 1, "name": "movie.mkv", "size": 4_000_000_000}],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_early", magnet=MAGNET, title="EarlyLinkTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam, \
+                 patch("app.services.stream.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt, \
+                 patch("app.services.stream.torbox.request_download_link", new_callable=AsyncMock) as mdl, \
+                 patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
+                mam.return_value = {"data": {"torrent_id": "888"}}
+                mgt.return_value = torrent_with_files
+                mdl.return_value = "https://cdn.torbox.app/stream.mkv"
+                await _process_job(job.job_id)
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "ready"
+        assert job.direct_url == "https://cdn.torbox.app/stream.mkv"
+
 
 # ---------------------------------------------------------------------------
 # /stream/status

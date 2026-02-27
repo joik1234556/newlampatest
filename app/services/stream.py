@@ -234,7 +234,14 @@ async def _process_job(job_id: str) -> None:
 
         # ── Adaptive polling ──────────────────────────────────────────────
         elapsed = 0
-        ready_states = frozenset(("seeding", "downloading", "completed", "cached", "ready"))
+        stall_ticks = 0
+        # TorBox states that mean the download will never complete
+        _TORBOX_DEAD_STATES = frozenset(
+            ("error", "stalledDL", "missingFiles", "uploaderror", "checkingResumeData")
+        )
+        # After this many consecutive zero-progress ticks, give up.
+        # Breakdown: 15 fast ticks × 2 s = 30 s; 5 slow ticks × 5 s = 25 s → 55 s total.
+        _STALL_TICK_LIMIT = 20  # 15 fast + 5 slow ticks ≈ 55 s
 
         while elapsed < TORBOX_POLL_MAX_SECONDS:
             interval = (
@@ -266,7 +273,28 @@ async def _process_job(job_id: str) -> None:
             state = torrent.get("download_state", "")
             files = torrent.get("files") or []
             progress_raw = float(torrent.get("progress", 0))
-            prog = min(0.90, 0.10 + progress_raw * 0.80)
+
+            # ── Detect TorBox-level dead states immediately ───────────────
+            if state in _TORBOX_DEAD_STATES:
+                dead_msg = (
+                    f"TorBox: торрент завис ({state}). "
+                    "Возможные причины: нет сидеров, лимит TorBox исчерпан, "
+                    "файл недоступен. Попробуйте другой источник."
+                )
+                logger.warning(
+                    "[Easy-Mod][TorBox] torrent in dead state=%s job_id=%s",
+                    state, job_id,
+                )
+                await _update_job(job_id, state="failed", message=dead_msg)
+                return
+
+            # ── Progress: use TorBox value when non-zero, else elapsed-based
+            if progress_raw > 0:
+                prog = min(0.90, 0.10 + progress_raw * 0.80)
+                stall_ticks = 0
+            else:
+                stall_ticks += 1
+                prog = min(0.45, 0.10 + (elapsed / TORBOX_POLL_MAX_SECONDS) * 0.35)
 
             logger.info(
                 "[Easy-Mod][TorBox] poll state=%s progress=%.2f elapsed=%ds job_id=%s",
@@ -274,7 +302,10 @@ async def _process_job(job_id: str) -> None:
             )
             await _update_job(job_id, progress=prog)
 
-            if state in ready_states and files:
+            # ── Try to get download link as soon as files are available ───
+            # TorBox direct links support Range requests — player can stream
+            # even while the torrent is still downloading (progressive play).
+            if files:
                 file_id = files[0].get("id", 0)
                 try:
                     direct_url = await torbox.request_download_link(torrent_id, file_id)
@@ -300,6 +331,20 @@ async def _process_job(job_id: str) -> None:
                         job_id, direct_url,
                     )
                     return
+
+            # ── Stall detection: no progress and no usable files for too long
+            if stall_ticks >= _STALL_TICK_LIMIT:
+                stall_msg = (
+                    "TorBox не начал загрузку за отведённое время. "
+                    "Возможные причины: нет сидеров, закончился лимит TorBox, "
+                    "TorBox перегружен. Попробуйте другой источник."
+                )
+                logger.warning(
+                    "[Easy-Mod][TorBox] stall timeout stall_ticks=%d job_id=%s",
+                    stall_ticks, job_id,
+                )
+                await _update_job(job_id, state="failed", message=stall_msg)
+                return
 
         # ── Timed out ─────────────────────────────────────────────────────
         await _update_job(

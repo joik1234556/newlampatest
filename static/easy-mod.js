@@ -63,65 +63,160 @@
     }
 
     // -----------------------------------------------------------------
-    // Generic GET via Lampa.Request
+    // Low-level HTTP helpers: Lampa.Request → fetch → XHR
     // -----------------------------------------------------------------
-    function apiGet(path, params, ok, fail) {
-        var url = API + path + qs(params || {});
+    function netGet(url, ok, fail) {
         var req = makeRequest();
-        if (!req) {
-            log('GET skipped – no network', url);
-            if (fail) { fail('no network available'); }
-            return;
+        if (req && req.silent) {
+            log('netGet via Lampa.Request', url);
+            try {
+                req.silent(url, function (raw) {
+                    try {
+                        var json = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+                        if (ok) { ok(json); }
+                    } catch (e) {
+                        log('netGet Lampa parse error', e.message);
+                        if (fail) { fail('json parse error'); }
+                    }
+                }, function (err) {
+                    log('netGet Lampa error', err, '— falling back to fetch/XHR');
+                    netGetFallback(url, ok, fail);
+                });
+                return;
+            } catch (e) {
+                log('netGet Lampa exception', e.message, '— falling back');
+            }
         }
-        log('GET', url);
-        try {
-            req.silent(url, function (raw) {
-                try {
-                    var json = (typeof raw === 'string') ? JSON.parse(raw) : raw;
-                    if (ok) { ok(json); }
-                } catch (e) {
-                    log('GET parse error', path, e.message);
-                    if (fail) { fail('json parse error'); }
-                }
-            }, function (err) {
-                log('GET error', path, err);
-                if (fail) { fail(err || 'network error'); }
-            });
-        } catch (e) {
-            log('GET exception', path, e.message);
-            if (fail) { fail(e.message); }
+        netGetFallback(url, ok, fail);
+    }
+
+    function netGetFallback(url, ok, fail) {
+        if (typeof fetch !== 'undefined') {
+            log('netGet via fetch', url);
+            fetch(url)
+                .then(function (r) { return r.json(); })
+                .then(function (json) { if (ok) { ok(json); } })
+                .catch(function (e) {
+                    log('netGet fetch error', e.message);
+                    if (fail) { fail(e.message || 'fetch error'); }
+                });
+        } else {
+            log('netGet via XHR', url);
+            try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', url, true);
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState !== 4) { return; }
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            var json = JSON.parse(xhr.responseText);
+                            if (ok) { ok(json); }
+                        } catch (e) {
+                            log('netGet XHR parse error', e.message);
+                            if (fail) { fail('json parse error'); }
+                        }
+                    } else {
+                        log('netGet XHR status', xhr.status);
+                        if (fail) { fail('http ' + xhr.status); }
+                    }
+                };
+                xhr.onerror = function () {
+                    log('netGet XHR onerror');
+                    if (fail) { fail('xhr error'); }
+                };
+                xhr.send();
+            } catch (e) {
+                log('netGet XHR exception', e.message);
+                if (fail) { fail(e.message); }
+            }
+        }
+    }
+
+    function netPost(url, body, ok, fail) {
+        var req = makeRequest();
+        if (req && req.silent) {
+            log('netPost via Lampa.Request', url);
+            try {
+                req.silent(url, function (raw) {
+                    try {
+                        var json = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+                        if (ok) { ok(json); }
+                    } catch (e) {
+                        log('netPost Lampa parse error', e.message);
+                        if (fail) { fail('json parse error'); }
+                    }
+                }, function (err) {
+                    log('netPost Lampa error', err, '— falling back to fetch/XHR');
+                    netPostFallback(url, body, ok, fail);
+                }, body);
+                return;
+            } catch (e) {
+                log('netPost Lampa exception', e.message, '— falling back');
+            }
+        }
+        netPostFallback(url, body, ok, fail);
+    }
+
+    function netPostFallback(url, body, ok, fail) {
+        if (typeof fetch !== 'undefined') {
+            log('netPost via fetch', url);
+            fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (json) { if (ok) { ok(json); } })
+                .catch(function (e) {
+                    log('netPost fetch error', e.message);
+                    if (fail) { fail(e.message || 'fetch error'); }
+                });
+        } else {
+            log('netPost via XHR', url);
+            try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', url, true);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState !== 4) { return; }
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            var json = JSON.parse(xhr.responseText);
+                            if (ok) { ok(json); }
+                        } catch (e) {
+                            log('netPost XHR parse error', e.message);
+                            if (fail) { fail('json parse error'); }
+                        }
+                    } else {
+                        log('netPost XHR status', xhr.status);
+                        if (fail) { fail('http ' + xhr.status); }
+                    }
+                };
+                xhr.onerror = function () {
+                    log('netPost XHR onerror');
+                    if (fail) { fail('xhr error'); }
+                };
+                xhr.send(JSON.stringify(body));
+            } catch (e) {
+                log('netPost XHR exception', e.message);
+                if (fail) { fail(e.message); }
+            }
         }
     }
 
     // -----------------------------------------------------------------
-    // Generic POST via Lampa.Request
+    // API helpers — build URL and delegate to netGet / netPost
     // -----------------------------------------------------------------
+    function apiGet(path, params, ok, fail) {
+        var url = API + path + qs(params || {});
+        log('GET', url);
+        netGet(url, ok, fail);
+    }
+
     function apiPost(path, body, ok, fail) {
         var url = API + path;
-        var req = makeRequest();
-        if (!req) {
-            log('POST skipped – no network', url);
-            if (fail) { fail('no network available'); }
-            return;
-        }
         log('POST', url, JSON.stringify(body));
-        try {
-            req.silent(url, function (raw) {
-                try {
-                    var json = (typeof raw === 'string') ? JSON.parse(raw) : raw;
-                    if (ok) { ok(json); }
-                } catch (e) {
-                    log('POST parse error', path, e.message);
-                    if (fail) { fail('json parse error'); }
-                }
-            }, function (err) {
-                log('POST error', path, err);
-                if (fail) { fail(err || 'network error'); }
-            }, body);
-        } catch (e) {
-            log('POST exception', path, e.message);
-            if (fail) { fail(e.message); }
-        }
+        netPost(url, body, ok, fail);
     }
 
     // -----------------------------------------------------------------
@@ -215,6 +310,7 @@
         }, function (err) {
             if (self._dead) { return; }
             log('variants error', err);
+            try { Lampa.Noty.show('Easy-Mod: /variants error'); } catch (e) {}
             self._render.html('<div class="online-empty">Ошибка сервера: ' + (err || '') + '</div>');
         });
     };
@@ -267,6 +363,7 @@
         }, function (err) {
             if (self._dead) { return; }
             log('startStream error', err);
+            try { Lampa.Noty.show('Easy-Mod: /stream/start error'); } catch (e) {}
             self._render.html('<div class="online-empty">Ошибка запуска: ' + (err || '') + '</div>');
         });
     };
@@ -292,7 +389,8 @@
         this._render = $('<div class="easy-mod-page easy-mod-wait">');
         this._dead   = false;
         this._timer  = null;
-        this._ticks  = 0;
+        this._ticks        = 0;
+        this._statusErrors = 0;
         this._FAST_TICKS   = 15; // first 30 s at 2 s interval
         this._FAST_INTERVAL= 2000;
         this._SLOW_INTERVAL= 5000;
@@ -372,6 +470,7 @@
                     return;
                 }
 
+                self._statusErrors = 0;
                 self._scheduleNext();
             } catch (e) {
                 log('poll response error', e.message);
@@ -380,6 +479,11 @@
         }, function (err) {
             if (self._dead) { return; }
             log('poll error', err);
+            self._statusErrors++;
+            if (self._statusErrors >= 3) {
+                try { Lampa.Noty.show('Easy-Mod: /stream/status error'); } catch (e) {}
+                self._statusErrors = 0;
+            }
             self._scheduleNext();
         });
     };
@@ -482,6 +586,7 @@
 
                 btn.on('hover:enter click', function () {
                     log('open variants for', (movie && (movie.title || movie.name)) || '?');
+                    try { Lampa.Noty.show('Easy-Mod: click'); } catch (e) {}
                     try {
                         Lampa.Activity.push({
                             component: 'easy_mod_variants',

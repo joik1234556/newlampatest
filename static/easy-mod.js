@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.14');
+    console.log('[Easy-Mod] loaded v4.15');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -517,8 +517,24 @@
         clearTimeout(self._timer);
         self._dead = true;
         try {
+            var hint = '';
+            if (msg && (msg.indexOf('HTTP 401') !== -1 || msg.indexOf('401') !== -1)) {
+                hint = 'Проверьте TORBOX_API_KEY на сервере — ключ недействителен или истёк.';
+            } else if (msg && (msg.indexOf('HTTP 422') !== -1 || msg.indexOf('422') !== -1)) {
+                hint = 'TorBox отклонил запрос (422). Проверьте формат magnet-ссылки.';
+            } else if (msg && (msg.indexOf('HTTP 429') !== -1 || msg.indexOf('429') !== -1)) {
+                hint = 'Превышен лимит запросов TorBox. Подождите несколько минут.';
+            } else if (msg && (msg.indexOf('RetryError') !== -1 || msg.indexOf('retry') !== -1 || msg.indexOf('попытки') !== -1)) {
+                hint = 'TorBox недоступен или вернул ошибку несколько раз подряд. ' +
+                       'Возможные причины: неверный API-ключ, превышен лимит, ' +
+                       'TorBox на обслуживании. Попробуйте ещё раз через минуту.';
+            } else if (msg && msg.indexOf('torrent_id') !== -1) {
+                hint = 'TorBox не принял magnet-ссылку. Возможно, лимит активных ' +
+                       'торрентов исчерпан или ссылка недействительна.';
+            }
             self._render.html(
                 '<div class="easy-mod-wait__error">' + msg + '</div>' +
+                (hint ? '<div class="easy-mod-wait__hint" style="font-size:0.85em;opacity:0.75;margin-top:0.5em">' + hint + '</div>' : '') +
                 '<div class="selector easy-mod-wait__back">← Вернуться к вариантам</div>'
             );
             self._render.find('.easy-mod-wait__back').on('hover:enter click', function () {

@@ -22,6 +22,8 @@ import re
 import uuid
 from typing import Optional
 
+from tenacity import RetryError
+
 from app import torbox
 from app.cache import direct_url_cache, job_cache, magnet_job_cache
 from app.config import (
@@ -186,11 +188,32 @@ async def _process_job(job_id: str) -> None:
             "[Easy-Mod][TorBox] add_magnet job_id=%s magnet=%.60s",
             job_id, job.magnet,
         )
-        result = await torbox.add_magnet(job.magnet)
+        try:
+            result = await torbox.add_magnet(job.magnet)
+        except RetryError as retry_err:
+            cause = retry_err.last_attempt.exception()
+            if cause is not None and hasattr(cause, "response"):
+                msg = (
+                    f"TorBox HTTP {cause.response.status_code}: "
+                    f"{cause.response.text[:300]}"
+                )
+            elif cause is not None:
+                msg = f"TorBox: {type(cause).__name__}: {cause}"
+            else:
+                msg = "TorBox unreachable (all retry attempts exhausted)"
+            logger.error(
+                "[Easy-Mod][TorBox] add_magnet RetryError job_id=%s: %s",
+                job_id, msg,
+            )
+            await _update_job(job_id, state="failed", message=msg)
+            return
+
         data = result.get("data") or {}
         torrent_id = data.get("torrent_id") or data.get("id")
 
         if not torrent_id:
+            detail = result.get("detail") or result.get("error") or ""
+            msg = f"TorBox did not return a torrent ID ({detail})" if detail else "TorBox did not return a torrent ID"
             logger.warning(
                 "[Easy-Mod][TorBox] no torrent_id returned job_id=%s resp=%s",
                 job_id, result,
@@ -198,7 +221,7 @@ async def _process_job(job_id: str) -> None:
             await _update_job(
                 job_id,
                 state="failed",
-                message="TorBox did not return a torrent ID",
+                message=msg,
             )
             return
 

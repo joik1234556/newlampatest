@@ -26,6 +26,8 @@ def _client() -> httpx.AsyncClient:
 async def _get(path: str, params: dict | None = None) -> Any:
     async with _client() as client:
         resp = await client.get(f"{TORBOX_BASE_URL}{path}", params=params)
+        if not resp.is_success:
+            logger.error("TorBox GET %s status=%d body=%.300s", path, resp.status_code, resp.text)
         resp.raise_for_status()
         return resp.json()
 
@@ -34,6 +36,8 @@ async def _get(path: str, params: dict | None = None) -> Any:
 async def _post(path: str, data: dict | None = None) -> Any:
     async with _client() as client:
         resp = await client.post(f"{TORBOX_BASE_URL}{path}", data=data)
+        if not resp.is_success:
+            logger.error("TorBox POST %s status=%d body=%.300s", path, resp.status_code, resp.text)
         resp.raise_for_status()
         return resp.json()
 

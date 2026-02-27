@@ -170,6 +170,45 @@ class TestStreamStart:
         # Second request must return the same job_id
         assert r1.json()["job_id"] == r2.json()["job_id"]
 
+    def test_retry_error_produces_readable_job_message(self):
+        """RetryError from TorBox add_magnet must produce a human-readable failed job."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from tenacity import RetryError, Future as TenacityFuture
+        import httpx
+        from app.services.stream import create_job
+        from app.models import StreamStartRequest
+
+        # Build a fake RetryError wrapping an httpx.HTTPStatusError
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.text = '{"detail": "Unauthorized"}'
+        http_err = httpx.HTTPStatusError("401", request=MagicMock(), response=mock_resp)
+
+        # tenacity.Future holds the last attempt's exception
+        fut = TenacityFuture(1)
+        fut.set_exception(http_err)
+        retry_err = RetryError(fut)
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+            "&dn=RetryTest"
+        )
+
+        async def run():
+            with patch("app.services.stream.torbox.add_magnet", side_effect=retry_err):
+                req = StreamStartRequest(variant_id="v_retry", magnet=MAGNET, title="RetryTest")
+                job = await create_job(req)
+                # Give background task time to run
+                await asyncio.sleep(0.2)
+                from app.services.stream import _load_job
+                return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "failed"
+        assert "401" in job.message or "HTTP" in job.message or "TorBox" in job.message
+
 
 # ---------------------------------------------------------------------------
 # /stream/status

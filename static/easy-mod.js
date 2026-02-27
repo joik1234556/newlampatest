@@ -253,6 +253,7 @@
         console.log('[Easy-Mod] VARIANTS START CALLED');
         try { Lampa.Noty.show('[Easy-Mod] variants.start()'); } catch (e) {}
         log('variants start');
+        log('variants start movie=', JSON.stringify(this._movie || {}));
         var self  = this;
         var m     = self._movie || {};
         var title = m.title || m.name || m.original_title || m.original_name || '';
@@ -266,6 +267,7 @@
         if (year)  { params.year  = year;  }
         if (tmdb)  { params.tmdb_id = tmdb; }
 
+        log('variants request params=', JSON.stringify(params));
         apiGet('/variants', params, function (data) {
             if (self._dead) { return; }
             try {
@@ -666,32 +668,15 @@
     // ==================================================================
     function registerComponents() {
         try {
-            if (!Lampa || !Lampa.Component) {
-                console.log('[Easy-Mod] Lampa.Component not found');
-                return;
-            }
-
-            // Web Lampa internal registry
-            if (Lampa.Component.components3) {
-                Lampa.Component.components3['easy_mod_variants'] = EasyModVariants;
-                Lampa.Component.components3['easy_mod_wait'] = EasyModWait;
-
-                console.log('[Easy-Mod] registered via components3');
-            } else if (Lampa.Component.components) {
-                Lampa.Component.components['easy_mod_variants'] = EasyModVariants;
-                Lampa.Component.components['easy_mod_wait'] = EasyModWait;
-
-                console.log('[Easy-Mod] registered via components');
-            } else {
-                // fallback
+            if (typeof Lampa !== 'undefined' && Lampa.Component && typeof Lampa.Component.add === 'function') {
                 Lampa.Component.add('easy_mod_variants', EasyModVariants);
                 Lampa.Component.add('easy_mod_wait', EasyModWait);
-
-                console.log('[Easy-Mod] registered via Component.add fallback');
+                log('components registered via Component.add (constructors)');
+            } else {
+                log('Lampa.Component.add not available');
             }
-
         } catch (e) {
-            console.log('[Easy-Mod] register error', e);
+            log('registerComponents error', e.message);
         }
     }
 

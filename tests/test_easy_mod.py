@@ -84,8 +84,29 @@ class TestVariants:
         assert r2.status_code == 200
         assert r1.json()["variants"] == r2.json()["variants"]
 
-    def test_variants_demo_provider_returns_data(self, client):
-        resp = client.get("/variants?title=Матрица&year=1999")
+    def test_variants_returns_data_when_provider_works(self, client):
+        """Verify /variants properly returns variants when a provider succeeds."""
+        from app.models import Variant
+        from app.providers.torrentio import TorrentioProvider
+
+        fake_variant = Variant(
+            id="abc123test",
+            label="Test 1080p",
+            language="ru",
+            voice="Test",
+            quality="1080p",
+            size_mb=5000,
+            seeders=100,
+            codec="H264",
+            magnet="magnet:?xt=urn:btih:AABBCCDDEEAABBCCDDEEAABBCCDDEEAABBCCDDEE",
+        )
+
+        with patch.object(
+            TorrentioProvider,
+            "search_variants",
+            new=AsyncMock(return_value=[fake_variant]),
+        ):
+            resp = client.get("/variants?title=UniqueProviderTestXYZ999&year=2025")
         assert resp.status_code == 200
         body = resp.json()
         assert len(body["variants"]) > 0

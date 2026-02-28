@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.1';
+    var VERSION = '5.2';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -72,6 +72,20 @@
         ".view--easy_mod .em-spin{display:inline-block;vertical-align:middle;margin-right:.3em}",
         ".view--easy_mod span{display:inline-block;vertical-align:middle}",
         ".view--easy_mod.focus{-webkit-transform:scale(1.02);transform:scale(1.02)}",
+        // Filter bar
+        ".em-filters{display:-webkit-box;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;gap:.45em;padding:.3em 0 1.1em;-webkit-box-align:center;align-items:center}",
+        ".em-filter-group{display:-webkit-box;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;gap:.4em;-webkit-box-align:center;align-items:center;margin-right:.8em}",
+        ".em-filter-label{font-size:.8em;opacity:.55;margin-right:.1em;white-space:nowrap}",
+        ".em-filter-btn{display:inline-block;padding:.25em .75em;border-radius:2em;cursor:pointer;font-size:.85em;background:rgba(255,255,255,.1);white-space:nowrap}",
+        ".em-filter-btn.focus{background:#fff;color:#000}",
+        ".em-filter-btn.active{background:rgba(255,212,2,.85);color:#000}",
+        ".em-filter-btn.active.focus{background:#fff;color:#000}",
+        // Voice/language tags on card
+        ".em-voice-row{margin-top:.4em;display:-webkit-box;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;gap:.35em;-webkit-box-align:center;align-items:center}",
+        ".em-tag{display:inline-block;padding:.1em .5em;border-radius:.25em;font-size:.75em;background:rgba(255,255,255,.15);white-space:nowrap}",
+        ".em-tag--voice{background:rgba(181,141,54,.35)}",
+        ".em-tag--lang{background:rgba(24,143,223,.35)}",
+        ".em-tag--quality{background:rgba(76,175,80,.25)}",
     ].join('');
 
     function injectCSS() {
@@ -205,6 +219,12 @@
         return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB';
     }
 
+    var _LANG_LABELS = { ru: '\u0420\u0443\u0441', ua: '\u0423\u043a\u0440', uk: '\u0423\u043a\u0440', en: 'ENG', de: 'DE', fr: 'FR', es: 'ES', it: 'IT', pl: 'PL' };
+    function langLabel(code) {
+        var c = (code || '').toLowerCase();
+        return _LANG_LABELS[c] || code.toUpperCase();
+    }
+
     function qualityColorClass(q) {
         q = (q || '').toLowerCase();
         if (q === '2160p' || q === '4k') { return 'em-quality--4k'; }
@@ -284,10 +304,78 @@
         footer.append(infoEl);
         body.append(footer);
 
+        // Voice + language tags row
+        var tagRow = jq('<div class="em-voice-row">');
+        if (v.voice) {
+            tagRow.append(jq('<span class="em-tag em-tag--voice">').text('\u041e\u0437\u0432\u0443\u0447\u043a\u0430: ' + v.voice));
+        }
+        if (v.language) {
+            tagRow.append(jq('<span class="em-tag em-tag--lang">').text('\u042f\u0437\u044b\u043a: ' + langLabel(v.language)));
+        }
+        if (tagRow.children().length) { body.append(tagRow); }
+
         card.append(body);
 
         card.on('hover:enter click', function () { if (onSelect) { onSelect(v); } });
         return card;
+    }
+
+    // -------------------------------------------------------
+    // Filter bar: quality + voice pills (modss-style)
+    // -------------------------------------------------------
+    function buildFilters(variants, activeVoice, activeQuality, onChange) {
+        var voices = [], qualities = [], voiceSeen = {}, qualSeen = {};
+        for (var i = 0; i < variants.length; i++) {
+            var vc = variants[i].voice || '';
+            var qc = (variants[i].quality || '').toLowerCase();
+            if (vc && !voiceSeen[vc]) { voiceSeen[vc] = true; voices.push(vc); }
+            if (qc && !qualSeen[qc]) { qualSeen[qc] = true; qualities.push(qc); }
+        }
+        var hasQual  = qualities.length > 1;
+        var hasVoice = voices.length > 1;
+        if (!hasQual && !hasVoice) { return null; }
+
+        var wrap = jq('<div class="em-filters">');
+
+        // Quality group
+        if (hasQual) {
+            var qg = jq('<div class="em-filter-group">');
+            qg.append(jq('<span class="em-filter-label">').text('\u041a\u0430\u0447\u0435\u0441\u0442\u0432\u043e:'));
+            var qAll = jq('<div class="em-filter-btn selector">').text('\u0412\u0441\u0435');
+            if (!activeQuality) { qAll.addClass('active'); }
+            qAll.on('hover:enter click', function () { onChange('quality', ''); });
+            qg.append(qAll);
+            for (var qi = 0; qi < qualities.length; qi++) {
+                (function (q) {
+                    var btn = jq('<div class="em-filter-btn selector">').text(q.toUpperCase());
+                    if (activeQuality === q) { btn.addClass('active'); }
+                    btn.on('hover:enter click', function () { onChange('quality', q); });
+                    qg.append(btn);
+                })(qualities[qi]);
+            }
+            wrap.append(qg);
+        }
+
+        // Voice group
+        if (hasVoice) {
+            var vg = jq('<div class="em-filter-group">');
+            vg.append(jq('<span class="em-filter-label">').text('\u041e\u0437\u0432\u0443\u0447\u043a\u0430:'));
+            var vAll = jq('<div class="em-filter-btn selector">').text('\u0412\u0441\u0435');
+            if (!activeVoice) { vAll.addClass('active'); }
+            vAll.on('hover:enter click', function () { onChange('voice', ''); });
+            vg.append(vAll);
+            for (var vi = 0; vi < voices.length; vi++) {
+                (function (v) {
+                    var btn = jq('<div class="em-filter-btn selector">').text(v);
+                    if (activeVoice === v) { btn.addClass('active'); }
+                    btn.on('hover:enter click', function () { onChange('voice', v); });
+                    vg.append(btn);
+                })(voices[vi]);
+            }
+            wrap.append(vg);
+        }
+
+        return wrap;
     }
 
     // -------------------------------------------------------
@@ -305,11 +393,14 @@
     // Component: easy_mod_variants
     // ==================================================================
     function EasyModVariants(object) {
-        this._object = object || {};
-        this._movie  = (object && object.movie) ? object.movie : {};
-        this._render = jq('<div class="easy-mod-page" style="padding:1.5em 2em;min-height:10em">');
-        this._scroll = null;
-        this._dead   = false;
+        this._object       = object || {};
+        this._movie        = (object && object.movie) ? object.movie : {};
+        this._render       = jq('<div class="easy-mod-page" style="padding:1.5em 2em;min-height:10em">');
+        this._scroll       = null;
+        this._dead         = false;
+        this._allVariants  = [];
+        this._filterVoice  = '';
+        this._filterQuality = '';
     }
 
     EasyModVariants.prototype.create = function () { return this._render; };
@@ -356,7 +447,6 @@
             try {
                 var variants = (data && data.variants && data.variants.length) ? data.variants : [];
                 log('variants loaded N=' + variants.length);
-                self._render.empty();
 
                 if (!variants.length) {
                     self._render.html(
@@ -369,30 +459,10 @@
                     return;
                 }
 
-                // Wrap in Lampa.Scroll (like modss), fallback to plain list
-                try {
-                    var sc = new Lampa.Scroll({ mask: true, over: true });
-                    sc.render().addClass('layer--wheight');
-                    for (var i = 0; i < variants.length; i++) {
-                        (function (v) {
-                            sc.body().append(buildCard(v, m, function (sel) { self._startStream(sel); }));
-                        })(variants[i]);
-                    }
-                    self._render.append(sc.render());
-                    sc.start();
-                    self._scroll = sc;
-                } catch (scrollErr) {
-                    log('Lampa.Scroll error:', scrollErr.message);
-                    var list = jq('<div style="padding:0 1em">');
-                    for (var j = 0; j < variants.length; j++) {
-                        (function (v2) {
-                            list.append(buildCard(v2, m, function (sel) { self._startStream(sel); }));
-                        })(variants[j]);
-                    }
-                    self._render.append(list);
-                }
-
-                try { Lampa.Controller.toggle('content'); } catch (e) {}
+                self._allVariants  = variants;
+                self._filterVoice  = '';
+                self._filterQuality = '';
+                self._renderVariants();
             } catch (e) {
                 log('variants render error', e.message);
                 self._render.html('<div class="online-empty"><div class="online-empty__title">\u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f</div></div>');
@@ -407,6 +477,75 @@
                 '</div>'
             );
         });
+    };
+
+    EasyModVariants.prototype._renderVariants = function () {
+        var self     = this;
+        var m        = self._movie || {};
+        var variants = self._allVariants || [];
+        var fv       = self._filterVoice   || '';
+        var fq       = self._filterQuality || '';
+
+        // Destroy previous scroll
+        try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) {}
+        self._scroll = null;
+        self._render.empty();
+
+        // Apply filters
+        var shown = [];
+        for (var k = 0; k < variants.length; k++) {
+            var v = variants[k];
+            if (fv && (v.voice || '') !== fv) { continue; }
+            if (fq && (v.quality || '').toLowerCase() !== fq) { continue; }
+            shown.push(v);
+        }
+
+        // Filter bar
+        var filterBar = buildFilters(variants, fv, fq, function (type, val) {
+            if (type === 'quality') { self._filterQuality = val; }
+            if (type === 'voice')   { self._filterVoice   = val; }
+            self._renderVariants();
+        });
+
+        if (!shown.length) {
+            var emptyWrap = jq('<div style="padding:0 1em">');
+            if (filterBar) { emptyWrap.append(filterBar); }
+            emptyWrap.append(
+                '<div class="online-empty" style="padding:1em 0">' +
+                '<div class="online-empty__title">\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</div>' +
+                '</div>'
+            );
+            self._render.append(emptyWrap);
+            try { Lampa.Controller.toggle('content'); } catch (e) {}
+            return;
+        }
+
+        // Wrap in Lampa.Scroll (like modss), fallback to plain list
+        try {
+            var sc = new Lampa.Scroll({ mask: true, over: true });
+            sc.render().addClass('layer--wheight');
+            if (filterBar) { sc.body().append(filterBar); }
+            for (var i = 0; i < shown.length; i++) {
+                (function (v2) {
+                    sc.body().append(buildCard(v2, m, function (sel) { self._startStream(sel); }));
+                })(shown[i]);
+            }
+            self._render.append(sc.render());
+            sc.start();
+            self._scroll = sc;
+        } catch (scrollErr) {
+            log('Lampa.Scroll error:', scrollErr.message);
+            var list = jq('<div style="padding:0 1em">');
+            if (filterBar) { list.append(filterBar); }
+            for (var j = 0; j < shown.length; j++) {
+                (function (v3) {
+                    list.append(buildCard(v3, m, function (sel) { self._startStream(sel); }));
+                })(shown[j]);
+            }
+            self._render.append(list);
+        }
+
+        try { Lampa.Controller.toggle('content'); } catch (e) {}
     };
 
     EasyModVariants.prototype._startStream = function (variant) {

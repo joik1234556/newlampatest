@@ -21,6 +21,7 @@ class BaseProvider(ABC):
         title: str,
         year: Optional[int] = None,
         tmdb_id: Optional[str] = None,
+        original_title: Optional[str] = None,
     ) -> list[Variant]:
         """
         Return a list of Variant objects for the given title.

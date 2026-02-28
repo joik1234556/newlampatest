@@ -34,6 +34,7 @@ async def get_variants(
     title: str,
     year: Optional[int] = None,
     tmdb_id: Optional[str] = None,
+    original_title: Optional[str] = None,
 ) -> VariantsResponse:
     """
     Return sorted, deduplicated variants for a given title.
@@ -49,8 +50,8 @@ async def get_variants(
         return cached  # already a VariantsResponse (in-memory path)
 
     logger.info(
-        "[Easy-Mod][Variants] fetching title=%s year=%s tmdb_id=%s",
-        title, year, tmdb_id,
+        "[Easy-Mod][Variants] fetching title=%s year=%s tmdb_id=%s original_title=%s",
+        title, year, tmdb_id, original_title,
     )
 
     # Build provider pipeline:
@@ -60,7 +61,7 @@ async def get_variants(
     all_variants: list[Variant] = []
     for provider in providers:
         try:
-            results = await provider.search_variants(title, year, tmdb_id)
+            results = await provider.search_variants(title, year, tmdb_id, original_title=original_title)
             all_variants.extend(results)
             logger.info(
                 "[Easy-Mod][Variants] provider=%s returned %d variants",

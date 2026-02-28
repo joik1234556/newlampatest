@@ -27,6 +27,7 @@ class DemoProvider(BaseProvider):
         title: str,
         year: Optional[int] = None,
         tmdb_id: Optional[str] = None,
+        original_title: Optional[str] = None,
     ) -> list[Variant]:
         logger.info("[Easy-Mod][DemoProvider] search title=%s year=%s", title, year)
 

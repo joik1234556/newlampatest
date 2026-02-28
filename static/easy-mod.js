@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.16');
+    console.log('[Easy-Mod] loaded v4.17');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -268,6 +268,8 @@
         var title = m.title || m.name || m.original_title || m.original_name || '';
         var year  = m.year || (m.release_date ? m.release_date.slice(0, 4) : '') || '';
         var tmdb  = m.id || m.tmdb_id || '';  // some Activity data uses tmdb_id instead of id
+        // original_title is the non-localised title (e.g. English) — helps Jackett find more results
+        var orig  = m.original_title || m.original_name || '';
 
         self._render.html('<div class="online-empty">Загрузка вариантов…</div>');
 
@@ -275,6 +277,7 @@
         if (title) { params.title = title; }
         if (year)  { params.year  = year;  }
         if (tmdb)  { params.tmdb_id = tmdb; }
+        if (orig && orig !== title) { params.original_title = orig; }
 
         log('variants request params=', JSON.stringify(params));
         apiGet('/variants', params, function (data) {

@@ -58,66 +58,86 @@ class JackettProvider(BaseProvider):
         title: str,
         year: Optional[int] = None,
         tmdb_id: Optional[str] = None,
+        original_title: Optional[str] = None,
     ) -> list[Variant]:
         if not JACKETT_URL or not JACKETT_API_KEY:
             logger.debug("[JackettProvider] not configured, skipping")
             return []
 
-        query = f"{title} {year}" if year else title
-        params = {
-            "apikey": JACKETT_API_KEY,
-            "t": "search",
-            "q": query,
-            "cat": "2000,5000",  # Movies + TV
-        }
+        # Build list of queries: primary title first, then original_title if it differs
+        queries: list[str] = []
+        primary = f"{title} {year}" if year else title
+        queries.append(primary)
+        if original_title and original_title.lower() != title.lower():
+            queries.append(f"{original_title} {year}" if year else original_title)
+
         url = f"{JACKETT_URL.rstrip('/')}/api/v2.0/indexers/all/results"
-        logger.info("[JackettProvider] GET %s query=%s", url, query)
-
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:
-            logger.warning("[JackettProvider] request error: %s", exc)
-            return []
-
-        results = data.get("Results") or []
+        seen_magnets: set[str] = set()
         variants: list[Variant] = []
 
-        for r in results:
-            magnet = r.get("MagnetUri") or ""
-            if not magnet.startswith("magnet:"):
-                # Jackett may omit MagnetUri for some indexers; skip those
+        for query in queries:
+            params = {
+                "apikey": JACKETT_API_KEY,
+                "t": "search",
+                "q": query,
+                "cat": "2000,5000",  # Movies + TV
+            }
+            logger.info("[JackettProvider] GET %s query=%s", url, query)
+
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.get(url, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+            except Exception as exc:
+                logger.warning("[JackettProvider] request error query=%s: %s", query, exc)
                 continue
 
-            title_r = r.get("Title", "")
-            seeders = int(r.get("Seeders", 0) or 0)
-            size_bytes = int(r.get("Size", 0) or 0)
-            size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
-            quality = _guess_quality(title_r)
-            codec = _guess_codec(title_r)
+            results = data.get("Results") or []
 
-            vid = hashlib.sha1(
-                f"jackett:{title_r}:{quality}:{seeders}".encode()
-            ).hexdigest()[:12]
-            label = f"Jackett • {quality.upper()}"
+            count_before = len(variants)
+            for r in results:
+                magnet = r.get("MagnetUri") or ""
+                if not magnet.startswith("magnet:"):
+                    # Jackett may omit MagnetUri for some indexers; skip those
+                    continue
 
-            variants.append(
-                Variant(
-                    id=vid,
-                    label=label,
-                    language="ru",
-                    voice="",
-                    quality=quality,
-                    size_mb=size_mb,
-                    seeders=seeders,
-                    codec=codec,
-                    magnet=magnet,
+                if magnet in seen_magnets:
+                    continue
+                seen_magnets.add(magnet)
+
+                title_r = r.get("Title", "")
+                seeders = int(r.get("Seeders", 0) or 0)
+                size_bytes = int(r.get("Size", 0) or 0)
+                size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
+                quality = _guess_quality(title_r)
+                codec = _guess_codec(title_r)
+
+                vid = hashlib.sha1(
+                    f"jackett:{title_r}:{quality}:{seeders}".encode()
+                ).hexdigest()[:12]
+                label = f"Jackett • {quality.upper()}"
+
+                variants.append(
+                    Variant(
+                        id=vid,
+                        label=label,
+                        language="ru",
+                        voice="",
+                        quality=quality,
+                        size_mb=size_mb,
+                        seeders=seeders,
+                        codec=codec,
+                        magnet=magnet,
+                    )
                 )
+
+            logger.info(
+                "[JackettProvider] query=%s found %d new results", query, len(variants) - count_before
             )
 
         logger.info(
-            "[JackettProvider] found %d results for '%s'", len(variants), query
+            "[JackettProvider] total %d results for title='%s' original_title='%s'",
+            len(variants), title, original_title or "",
         )
         return variants

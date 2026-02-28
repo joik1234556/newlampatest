@@ -23,6 +23,7 @@ async def variants(
     title: str = Query(..., description="Film or series title"),
     year: Optional[int] = Query(None, description="Release year"),
     tmdb_id: Optional[str] = Query(None, description="TMDB ID for deduplication"),
+    original_title: Optional[str] = Query(None, description="Original (English) title for better Jackett search"),
 ) -> VariantsResponse:
     """
     Return sorted, deduplicated playback variants for a title.
@@ -32,7 +33,7 @@ async def variants(
         raise HTTPException(status_code=400, detail="title must not be empty")
 
     try:
-        return await get_variants(title.strip(), year, tmdb_id)
+        return await get_variants(title.strip(), year, tmdb_id, original_title)
     except Exception as exc:
         logger.error("[Easy-Mod][/variants] error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc

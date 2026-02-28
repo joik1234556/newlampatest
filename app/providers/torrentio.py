@@ -79,19 +79,26 @@ class TorrentioProvider(BaseProvider):
             logger.info("[TorrentioProvider] no tmdb_id for '%s', skipping", title)
             return []
 
-        url = f"{TORRENTIO_BASE}/stream/movie/tmdb:{tmdb_id}.json"
-        logger.info("[TorrentioProvider] GET %s", url)
+        # Try movie format first, then series format (season 1 episode 1)
+        candidate_urls = [
+            f"{TORRENTIO_BASE}/stream/movie/tmdb:{tmdb_id}.json",
+            f"{TORRENTIO_BASE}/stream/series/tmdb:{tmdb_id}:1:1.json",
+        ]
 
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, follow_redirects=True)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:
-            logger.warning("[TorrentioProvider] request error for tmdb:%s: %s", tmdb_id, exc)
-            return []
-
-        streams = data.get("streams") or []
+        streams: list = []
+        for url in candidate_urls:
+            logger.info("[TorrentioProvider] GET %s", url)
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(url, follow_redirects=True)
+                    resp.raise_for_status()
+                    data = resp.json()
+                candidates = data.get("streams") or []
+                if candidates:
+                    streams = candidates
+                    break  # found streams — no need to try series format
+            except Exception as exc:
+                logger.warning("[TorrentioProvider] request error %s: %s", url, exc)
         variants: list[Variant] = []
 
         for stream in streams:

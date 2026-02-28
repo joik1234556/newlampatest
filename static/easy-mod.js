@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.2';
+    var VERSION = '5.3';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -249,19 +249,27 @@
             posterUrl = 'https://image.tmdb.org/t/p/w185' + posterUrl;
         }
 
+        // Movie year (from movie object)
+        var movieYear = '';
+        if (movie) {
+            movieYear = movie.year || '';
+            if (!movieYear && movie.release_date)   { movieYear = movie.release_date.slice(0, 4); }
+            if (!movieYear && movie.first_air_date) { movieYear = movie.first_air_date.slice(0, 4); }
+        }
+
         // Card title: label from provider, or voice + quality combo
         var codec = (v.codec || '').toUpperCase();
         var cardTitle = v.label || (v.voice ? v.voice + ' \u2022 ' + (v.quality || '').toUpperCase() : '');
         if (!cardTitle) { cardTitle = '\u0412\u0430\u0440\u0438\u0430\u043d\u0442'; }
 
-        // Meta info (codec if non-baseline H264, language)
+        // Meta info line: codec (if not baseline), language, size, year
         var infoParts = [];
-        // Normalize codec comparison: H264 and H.264 both mean baseline (hide them)
         var codecNorm = codec.replace('.', '');
         if (codecNorm && codecNorm !== 'H264') { infoParts.push(v.codec); }
-        if (v.language && v.language !== 'multi') { infoParts.push(v.language.toUpperCase()); }
+        if (v.language && v.language !== 'multi') { infoParts.push(langLabel(v.language)); }
         var sz = fmtSize(v.size_mb);
         if (sz) { infoParts.push(sz); }
+        if (movieYear) { infoParts.push(movieYear); }
         var infoHtml = infoParts.join('<span class="online_modss-split"> \u2022 </span>');
 
         // Quality text for right column
@@ -297,7 +305,7 @@
         head.append(jq('<div class="online_modss__time">').html(qualHtml));
         body.append(head);
 
-        // Footer row: info + size
+        // Footer row: meta info
         var footer = jq('<div class="online_modss__footer">');
         var infoEl = jq('<div class="online_modss__info">');
         if (infoHtml) { infoEl.html(infoHtml); }
@@ -401,6 +409,7 @@
         this._allVariants  = [];
         this._filterVoice  = '';
         this._filterQuality = '';
+        this._season       = (object && object.season) || 0;  // 0 = not set / show selector
     }
 
     EasyModVariants.prototype.create = function () { return this._render; };
@@ -427,20 +436,39 @@
         self._movie = m;
 
         var title = m.title || m.name || m.original_title || m.original_name || '';
-        var year  = m.year  || (m.release_date ? m.release_date.slice(0, 4) : '');
+        var year  = m.year  || (m.release_date ? m.release_date.slice(0, 4) : '')
+                            || (m.first_air_date ? m.first_air_date.slice(0, 4) : '');
         var tmdb  = m.id    || m.tmdb_id || '';
         var orig  = m.original_title || m.original_name || '';
 
+        // Detect TV series: has number_of_seasons or first_air_date or name (not title)
+        var isSeries = !!(m.number_of_seasons || m.first_air_date || (m.name && !m.title));
+        var totalSeasons = (m.number_of_seasons && parseInt(m.number_of_seasons, 10)) || 0;
+        // Use seasons array when available for accurate count
+        if (m.seasons && m.seasons.length) {
+            // Exclude specials (season_number == 0)
+            var realSeasons = m.seasons.filter(function (s) { return (s.season_number || 0) > 0; });
+            if (realSeasons.length > totalSeasons) { totalSeasons = realSeasons.length; }
+        }
+
+        // If this is a series and no season is selected yet, show the season picker
+        if (isSeries && !self._season) {
+            self._showSeasonPicker(m, title, totalSeasons);
+            return;
+        }
+
         // Show loading state
-        self._render.html(loadingHtml(
-            title ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb\u2026' : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026'
-        ));
+        var loadingLabel = title ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
+            (self._season ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._season : '') + '\u2026'
+            : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
+        self._render.html(loadingHtml(loadingLabel));
 
         var params = {};
         if (title) { params.title = title; }
         if (year)  { params.year  = year; }
         if (tmdb)  { params.tmdb_id = tmdb; }
         if (orig && orig !== title) { params.original_title = orig; }
+        if (self._season) { params.season = self._season; }
 
         apiGet('/variants', params, function (data) {
             if (self._dead) { return; }
@@ -477,6 +505,59 @@
                 '</div>'
             );
         });
+    };
+
+    EasyModVariants.prototype._showSeasonPicker = function (m, title, totalSeasons) {
+        var self = this;
+        // Build list of season numbers to show
+        var seasons = [];
+        if (m.seasons && m.seasons.length) {
+            m.seasons.forEach(function (s) {
+                if ((s.season_number || 0) > 0) { seasons.push(s.season_number); }
+            });
+        }
+        if (!seasons.length) {
+            // Fallback: use totalSeasons count or at least show seasons 1-5
+            var n = totalSeasons > 0 ? totalSeasons : 5;
+            for (var i = 1; i <= n; i++) { seasons.push(i); }
+        }
+
+        self._render.empty();
+        var wrap = jq('<div style="padding:0 .5em">');
+
+        // Header
+        wrap.append(
+            jq('<div class="online-empty__title" style="font-size:1.4em;margin-bottom:.8em">').text(
+                '\u0421\u0435\u0437\u043e\u043d — ' + (title || '\u0421\u0435\u0440\u0438\u0430\u043b')
+            )
+        );
+
+        // Season buttons
+        var btnWrap = jq('<div class="em-filters" style="gap:.6em;flex-wrap:wrap">');
+        seasons.forEach(function (sNum) {
+            var btn = jq('<div class="em-filter-btn selector">').text('\u0421\u0435\u0437\u043e\u043d ' + sNum);
+            btn.on('hover:enter click', function () {
+                self._season = sNum;
+                self._allVariants = [];
+                self._filterVoice = '';
+                self._filterQuality = '';
+                self.start();
+            });
+            btnWrap.append(btn);
+        });
+        wrap.append(btnWrap);
+
+        try {
+            var sc = new Lampa.Scroll({ mask: true, over: true });
+            sc.render().addClass('layer--wheight');
+            sc.body().append(wrap);
+            self._render.append(sc.render());
+            sc.start();
+            self._scroll = sc;
+        } catch (e) {
+            self._render.append(wrap);
+        }
+        try { Lampa.Controller.toggle('content'); } catch (e) {}
     };
 
     EasyModVariants.prototype._renderVariants = function () {

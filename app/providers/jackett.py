@@ -30,13 +30,62 @@ logger = logging.getLogger(__name__)
 
 _QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+# Season patterns: "S01", "S1E01", "сезон 1", "season 1"
+_SEASON_RE = re.compile(r"\bS(\d{1,2})(?:E\d+)?\b|\bсезон\s*(\d+)\b|\bseason\s*(\d+)\b", re.IGNORECASE)
 
 # Newznab/Jackett movie category range
 _MOVIE_CAT_MIN = 2000
 _MOVIE_CAT_MAX = 2999
 
-# Maximum variants returned per provider call — stops early HTTP requests
+# Maximum variants fetched per provider call — stops early HTTP requests
 MAX_VARIANTS = 20
+
+# Known RU dubbing studio patterns (lowercased needle → display name)
+_VOICE_STUDIOS: list[tuple[str, str]] = [
+    ("lostfilm",     "LostFilm"),
+    ("лостфильм",    "LostFilm"),
+    ("baibako",      "BaibaKo"),
+    ("байбако",      "BaibaKo"),
+    ("novafilm",     "NovaFilm"),
+    ("nova film",    "NovaFilm"),
+    ("новафильм",    "NovaFilm"),
+    ("coldfilm",     "ColdFilm"),
+    ("newstudio",    "NewStudio"),
+    ("нью студио",   "NewStudio"),
+    ("amedia",       "Amedia"),
+    ("амедиа",       "Amedia"),
+    ("jaskier",      "Jaskier"),
+    ("жасмин",       "Жасмин"),
+    ("кубик в кубе", "Кубик"),
+    ("kubik",        "Кубик"),
+    ("юсупов",       "Юсупов"),
+    ("гоблин",       "Гоблин"),
+    ("goblin",       "Гоблин"),
+    ("колобок",      "Колобок"),
+    ("sdi media",    "SDI Media"),
+]
+_DUB_RE = re.compile(r"\bdub\b|\bдубляж\b|\bдублирован", re.IGNORECASE)
+_SUB_RE = re.compile(r"\bsub(?:bed|title)?\b|\bсубтитры\b", re.IGNORECASE)
+_RU_LANG_RE = re.compile(r"\[(?:[^]]*\b(?:rus|рус)\b[^]]*)\]", re.IGNORECASE)
+
+
+def _guess_voice(title: str) -> str:
+    """
+    Try to extract a dubbing studio or audio type from a torrent title.
+    Returns a short display string, or '' if nothing is recognised.
+    """
+    t = title.lower()
+    for needle, display in _VOICE_STUDIOS:
+        if needle in t:
+            return display
+    if _DUB_RE.search(title):
+        return "Дубляж"
+    if _SUB_RE.search(title):
+        return "Субтитры"
+    # e.g. "[Rus/Eng]" → infer Russian dub present
+    if _RU_LANG_RE.search(title):
+        return "RU"
+    return ""
 
 
 def _guess_quality(name: str) -> str:
@@ -120,6 +169,7 @@ class JackettProvider(BaseProvider):
         title: str,
         year: Optional[int],
         original_title: Optional[str],
+        season: Optional[int] = None,
     ) -> list[str]:
         """Build ordered list of query strings to try, most specific first."""
         seen: set[str] = set()
@@ -131,18 +181,43 @@ class JackettProvider(BaseProvider):
                 seen.add(key)
                 queries.append(q)
 
-        # Primary: title alone (best recall — year is passed as separate param)
-        add(title)
-        # Secondary: original_title alone (catches English-named torrents)
-        if original_title and original_title.lower() != title.lower():
-            add(original_title)
-        # Tertiary: title + year (some indexers need it for disambiguation)
-        if year:
-            add(f"{title} {year}")
+        if season:
+            # Season-specific queries: Cyrillic + Latin formats
+            s2 = f"{season:02d}"
+            add(f"{title} сезон {season}")
+            add(f"{title} S{s2}")
             if original_title and original_title.lower() != title.lower():
-                add(f"{original_title} {year}")
+                add(f"{original_title} S{s2}")
+                add(f"{original_title} Season {season}")
+        else:
+            # Primary: title alone (best recall — year is passed as separate param)
+            add(title)
+            # Secondary: original_title alone (catches English-named torrents)
+            if original_title and original_title.lower() != title.lower():
+                add(original_title)
+            # Tertiary: title + year (some indexers need it for disambiguation)
+            if year:
+                add(f"{title} {year}")
+                if original_title and original_title.lower() != title.lower():
+                    add(f"{original_title} {year}")
 
         return queries
+
+    def _season_ok(self, title_r: str, season: Optional[int]) -> bool:
+        """
+        When a season is requested, check that the torrent title targets that season.
+        - If no season requested, always accept.
+        - If torrent title has no season indicator at all, keep it (may be a full-series pack).
+        - If it has a season indicator, accept only if it matches.
+        """
+        if not season:
+            return True
+        m = _SEASON_RE.search(title_r)
+        if not m:
+            return True  # no season marker — could be a full-series pack; keep it
+        found_str = m.group(1) or m.group(2) or m.group(3) or "0"
+        found = int(found_str)
+        return found == season
 
     async def search_variants(
         self,
@@ -150,13 +225,23 @@ class JackettProvider(BaseProvider):
         year: Optional[int] = None,
         tmdb_id: Optional[str] = None,
         original_title: Optional[str] = None,
+        season: Optional[int] = None,
     ) -> list[Variant]:
         if not JACKETT_URL or not JACKETT_API_KEY:
             logger.debug("[JackettProvider] not configured, skipping")
             return []
 
-        queries = self._build_queries(title, year, original_title)
+        queries = self._build_queries(title, year, original_title, season)
         url = f"{JACKETT_URL.rstrip('/')}/api/v2.0/indexers/all/results"
+        # For TV series, also include TV categories (5000 range)
+        if season:
+            cat_str = "2000,2010,2020,2030,2040,2045,2050,2060,5000,5030,5040,5045"
+        else:
+            # Include all Newznab movie sub-categories:
+            # 2000=Movies, 2010=Movies/Foreign, 2020=Movies/Other,
+            # 2030=Movies/SD, 2040=Movies/HD, 2045=Movies/UHD,
+            # 2050=Movies/BluRay, 2060=Movies/3D
+            cat_str = "2000,2010,2020,2030,2040,2045,2050,2060"
         seen_magnets: set[str] = set()
         variants: list[Variant] = []
 
@@ -165,11 +250,7 @@ class JackettProvider(BaseProvider):
                 "apikey": JACKETT_API_KEY,
                 "t": "search",
                 "q": query,
-                # Include all Newznab movie sub-categories:
-                # 2000=Movies, 2010=Movies/Foreign, 2020=Movies/Other,
-                # 2030=Movies/SD, 2040=Movies/HD, 2045=Movies/UHD,
-                # 2050=Movies/BluRay, 2060=Movies/3D
-                "cat": "2000,2010,2020,2030,2040,2045,2050,2060",
+                "cat": cat_str,
             }
             logger.info("[JackettProvider] GET %s query=%s", url, query)
 
@@ -205,7 +286,15 @@ class JackettProvider(BaseProvider):
                     )
                     continue
 
-                # ── 3. Title similarity — check both title and original_title ─
+                # ── 3. Season filter ──────────────────────────────────────────
+                if not self._season_ok(title_r, season):
+                    logger.debug(
+                        "[JackettProvider] skip '%s': season mismatch (want S%02d)",
+                        title_r, season,
+                    )
+                    continue
+
+                # ── 4. Title similarity — check both title and original_title ─
                 matched = _title_matches(title, title_r)
                 if not matched and original_title:
                     matched = _title_matches(original_title, title_r)
@@ -216,7 +305,7 @@ class JackettProvider(BaseProvider):
                     )
                     continue
 
-                # ── 4. Deduplication ─────────────────────────────────────────
+                # ── 5. Deduplication ─────────────────────────────────────────
                 if magnet in seen_magnets:
                     continue
                 seen_magnets.add(magnet)
@@ -226,18 +315,30 @@ class JackettProvider(BaseProvider):
                 size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
                 quality = _guess_quality(title_r)
                 codec = _guess_codec(title_r)
+                voice = _guess_voice(title_r)
+
+                # Extract year from the torrent title for the label (if known)
+                year_in_title = _YEAR_RE.search(title_r)
+                year_str = year_in_title.group(0) if year_in_title else (str(year) if year else "")
+
+                # Build human-readable label: quality + voice + year
+                label_parts = [quality.upper()]
+                if voice:
+                    label_parts.append(voice)
+                if year_str:
+                    label_parts.append(year_str)
+                label = "Jackett • " + " • ".join(label_parts)
 
                 vid = hashlib.sha1(
                     f"jackett:{title_r}:{quality}:{seeders}".encode()
                 ).hexdigest()[:12]
-                label = f"Jackett • {quality.upper()}"
 
                 variants.append(
                     Variant(
                         id=vid,
                         label=label,
                         language="ru",
-                        voice="",
+                        voice=voice,
                         quality=quality,
                         size_mb=size_mb,
                         seeders=seeders,
@@ -255,7 +356,7 @@ class JackettProvider(BaseProvider):
                 break
 
         logger.info(
-            "[JackettProvider] total %d results for title='%s' original_title='%s'",
-            len(variants), title, original_title or "",
+            "[JackettProvider] total %d results for title='%s' original_title='%s' season=%s",
+            len(variants), title, original_title or "", season,
         )
         return variants

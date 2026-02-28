@@ -25,17 +25,19 @@ async def variants(
     tmdb_id: Optional[str] = Query(None, description="TMDB ID for deduplication"),
     original_title: Optional[str] = Query(None, description="Original (English) title for better Jackett search"),
     quality: Optional[str] = Query(None, description="Filter by quality tier: 4k|2160p|1080p|720p|480p"),
+    season: Optional[int] = Query(None, description="TV series season number (1-based)"),
 ) -> VariantsResponse:
     """
     Return sorted, deduplicated playback variants for a title.
     Results are cached for 30 minutes.
-    Optionally filter to a single quality tier with the `quality` param.
+    Pass ``season`` for TV-series season-specific searches.
+    Optionally filter to a single quality tier with the ``quality`` param.
     """
     if not title.strip():
         raise HTTPException(status_code=400, detail="title must not be empty")
 
     try:
-        result = await get_variants(title.strip(), year, tmdb_id, original_title)
+        result = await get_variants(title.strip(), year, tmdb_id, original_title, season)
     except Exception as exc:
         logger.error("[Easy-Mod][/variants] error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc

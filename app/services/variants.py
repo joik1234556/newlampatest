@@ -1,6 +1,6 @@
 """
 Variants service — aggregates providers, deduplicates and sorts results.
-Cache keys use SHA-1 of normalised title+year+tmdb_id.
+Cache keys use SHA-1 of normalised title+year+tmdb_id+season.
 All cache I/O goes through the async CacheBackend interface.
 """
 from __future__ import annotations
@@ -19,16 +19,19 @@ from app.providers.torrentio import TorrentioProvider
 
 logger = logging.getLogger(__name__)
 
-# Quality ordering for sorting (higher value = higher priority)
+# Quality ordering for secondary sort key (higher value = higher priority)
 _QUALITY_ORDER = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k": 4}
+
+# How many variants to return to the user (top N by seeders)
+_MAX_RESULTS = 4
 
 
 def _quality_rank(q: str) -> int:
     return _QUALITY_ORDER.get(q.lower(), 2)
 
 
-def _cache_key(title: str, year: Optional[int], tmdb_id: Optional[str]) -> str:
-    raw = f"{title.lower().strip()}:{year or ''}:{tmdb_id or ''}"
+def _cache_key(title: str, year: Optional[int], tmdb_id: Optional[str], season: Optional[int] = None) -> str:
+    raw = f"{title.lower().strip()}:{year or ''}:{tmdb_id or ''}:{season or ''}"
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -37,23 +40,24 @@ async def get_variants(
     year: Optional[int] = None,
     tmdb_id: Optional[str] = None,
     original_title: Optional[str] = None,
+    season: Optional[int] = None,
 ) -> VariantsResponse:
     """
     Return sorted, deduplicated variants for a given title.
     Results are cached for VARIANTS_CACHE_TTL seconds.
     """
-    key = _cache_key(title, year, tmdb_id)
+    key = _cache_key(title, year, tmdb_id, season)
 
     cached = await variants_cache.aget(key)
     if cached is not None:
-        logger.info("[Easy-Mod][Variants] cache hit title=%s", title)
+        logger.info("[Easy-Mod][Variants] cache hit title=%s season=%s", title, season)
         if isinstance(cached, dict):
             return VariantsResponse(**cached)
         return cached  # already a VariantsResponse (in-memory path)
 
     logger.info(
-        "[Easy-Mod][Variants] fetching title=%s year=%s tmdb_id=%s original_title=%s",
-        title, year, tmdb_id, original_title,
+        "[Easy-Mod][Variants] fetching title=%s year=%s tmdb_id=%s original_title=%s season=%s",
+        title, year, tmdb_id, original_title, season,
     )
 
     # Build provider pipeline:
@@ -65,7 +69,9 @@ async def get_variants(
     jackett_found = 0
     for provider in providers:
         try:
-            results = await provider.search_variants(title, year, tmdb_id, original_title=original_title)
+            results = await provider.search_variants(
+                title, year, tmdb_id, original_title=original_title, season=season
+            )
             all_variants.extend(results)
             if provider.name == "jackett":
                 jackett_found = len(results)
@@ -80,7 +86,7 @@ async def get_variants(
     if jackett_found == 0:
         try:
             pub_results = await PublicJackettProvider().search_variants(
-                title, year, tmdb_id, original_title=original_title
+                title, year, tmdb_id, original_title=original_title, season=season
             )
             all_variants.extend(pub_results)
             logger.info(
@@ -95,7 +101,9 @@ async def get_variants(
         # Last resort: demo variants — only when explicitly enabled (dev/testing)
         if ENABLE_DEMO_PROVIDER:
             try:
-                demo = await DemoProvider().search_variants(title, year, tmdb_id, original_title=original_title)
+                demo = await DemoProvider().search_variants(
+                    title, year, tmdb_id, original_title=original_title, season=season
+                )
                 all_variants.extend(demo)
                 logger.info("[Easy-Mod][Variants] provider=demo (fallback) returned %d variants", len(demo))
             except Exception as exc:
@@ -111,27 +119,27 @@ async def get_variants(
             seen.add(v.id)
             deduped.append(v)
 
-    # Sort: quality desc → seeders desc → size_mb asc
-    # Zero-seeder entries go to the end
+    # Sort: seeders desc (primary) → quality desc (secondary) → size_mb desc (tiebreak)
+    # This gives the user the 4 most-seeded variants first.
     def _sort_key(v: Variant):
         return (
-            _quality_rank(v.quality),
             v.seeders if v.seeders > 0 else -1,
-            -v.size_mb,
+            _quality_rank(v.quality),
+            v.size_mb,
         )
 
     deduped.sort(key=_sort_key, reverse=True)
 
-    # Return all variants (up to MAX_VARIANTS), sorted by quality+seeders.
-    # The filter bar in the frontend lets the user narrow down by quality/voice.
-    final = deduped[:MAX_VARIANTS]
+    # Return top _MAX_RESULTS variants by seeders.
+    # MAX_VARIANTS (from jackett.py) is used as the provider-level fetch cap.
+    final = deduped[:_MAX_RESULTS]
 
     response = VariantsResponse(title=title, year=year, variants=final)
     # Store as dict so Redis serialisation is straightforward
     await variants_cache.aset(key, response.model_dump(), ttl=VARIANTS_CACHE_TTL)
     logger.info(
-        "[Easy-Mod][Variants] returning %d variants for title=%s",
-        len(final), title,
+        "[Easy-Mod][Variants] returning %d variants for title=%s season=%s",
+        len(final), title, season,
     )
     return response
 

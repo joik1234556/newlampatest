@@ -63,13 +63,19 @@ class PublicJackettProvider(BaseProvider):
         year: Optional[int] = None,
         tmdb_id: Optional[str] = None,
         original_title: Optional[str] = None,
+        season: Optional[int] = None,
     ) -> list[Variant]:
         # Build query list
         queries: list[str] = []
-        primary = f"{title} {year}" if year else title
-        queries.append(primary)
-        if original_title and original_title.lower() != title.lower():
-            queries.append(f"{original_title} {year}" if year else original_title)
+        if season:
+            queries.append(f"{title} S{season:02d}")
+            if original_title and original_title.lower() != title.lower():
+                queries.append(f"{original_title} S{season:02d}")
+        else:
+            primary = f"{title} {year}" if year else title
+            queries.append(primary)
+            if original_title and original_title.lower() != title.lower():
+                queries.append(f"{original_title} {year}" if year else original_title)
 
         seen_magnets: set[str] = set()
         variants: list[Variant] = []

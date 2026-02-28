@@ -318,6 +318,54 @@ async def _process_job(job_id: str) -> None:
             torrent_id, job_id,
         )
 
+        # ── Immediate check — TorBox cached torrents are ready instantly ──
+        # When TorBox has the torrent in its global cache, it enters "seeding"
+        # state right after add_magnet (no download required). Checking once
+        # without sleeping lets the user start watching immediately instead of
+        # waiting at least TORBOX_POLL_FAST_INTERVAL seconds.
+        _TORBOX_READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
+        try:
+            torrent_imm = await torbox.get_torrent_by_id(torrent_id)
+            if torrent_imm:
+                st_imm = torrent_imm.get("download_state", "")
+                files_imm = torrent_imm.get("files") or []
+                logger.info(
+                    "[Easy-Mod][TorBox] immediate check state=%s files=%d job_id=%s",
+                    st_imm, len(files_imm), job_id,
+                )
+                if st_imm in _TORBOX_READY_STATES and files_imm:
+                    fid = files_imm[0].get("id")
+                    if fid is not None:
+                        try:
+                            dl_url = await torbox.request_download_link(torrent_id, fid)
+                        except Exception as exc:
+                            logger.warning(
+                                "[Easy-Mod][TorBox] immediate requestdl error job_id=%s: %s",
+                                job_id, exc,
+                            )
+                            dl_url = None
+                        if dl_url:
+                            mhash = job.magnet_hash or _magnet_hash(job.magnet)
+                            await _save_direct_url(mhash, job.magnet, dl_url)
+                            await _update_job(
+                                job_id,
+                                torrent_id=torrent_id,
+                                state="ready",
+                                progress=1.0,
+                                direct_url=dl_url,
+                                message="",
+                            )
+                            logger.info(
+                                "[Easy-Mod][TorBox] instant cache-hit ready job_id=%s url=%.80s",
+                                job_id, dl_url,
+                            )
+                            return
+        except Exception as exc:
+            logger.debug(
+                "[Easy-Mod][TorBox] immediate check error (non-fatal) job_id=%s: %s",
+                job_id, exc,
+            )
+
         # ── Adaptive polling ──────────────────────────────────────────────
         elapsed = 0
         stall_ticks = 0

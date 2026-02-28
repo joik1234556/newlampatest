@@ -67,15 +67,17 @@ class TestVariants:
             assert "voice" in v
             assert "magnet" in v
 
-    def test_variants_sorted_by_quality(self, client):
+    def test_variants_sorted_by_seeders(self, client):
         resp = client.get("/variants?title=Test+Movie")
         assert resp.status_code == 200
         variants = resp.json()["variants"]
-        quality_order = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k": 4}
+        # Primary sort is seeders descending (zero-seeder variants go last)
         if len(variants) >= 2:
-            q0 = quality_order.get(variants[0]["quality"].lower(), 2)
-            q1 = quality_order.get(variants[1]["quality"].lower(), 2)
-            assert q0 >= q1  # descending
+            s0 = variants[0]["seeders"]
+            s1 = variants[1]["seeders"]
+            # If both are non-zero, first must have >= seeders
+            if s0 > 0 and s1 > 0:
+                assert s0 >= s1
 
     def test_variants_cached(self, client):
         # Two identical requests — both should succeed (second from cache)
@@ -994,7 +996,7 @@ class TestTorboxGetTorrentUrl:
 
 class TestVariantsTop3:
     def test_variants_at_most_max(self, client):
-        """After sorting, at most 20 variants are returned; all 5 fake variants come through."""
+        """After sorting by seeders, at most 4 variants are returned (_MAX_RESULTS cap)."""
         from unittest.mock import AsyncMock, patch
         from app.models import Variant
         from app.providers.torrentio import TorrentioProvider
@@ -1015,8 +1017,11 @@ class TestVariantsTop3:
             resp = client.get("/variants?title=Top3TestFilmXYZ123&year=2025")
         assert resp.status_code == 200
         variants = resp.json()["variants"]
-        # All 5 variants must be returned (we no longer cap at one-per-tier)
-        assert len(variants) == 5
+        # Capped at 4 (_MAX_RESULTS), sorted by seeders desc
+        assert len(variants) == 4
+        # First result must be the one with most seeders (v3: 200)
+        assert variants[0]["id"] == "v3"
+        assert variants[0]["seeders"] == 200
 
     def test_variants_quality_filter(self, client):
         """?quality=1080p returns only 1080p variants."""

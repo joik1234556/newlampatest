@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.3';
+    var VERSION = '5.4';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -331,7 +331,7 @@
     // -------------------------------------------------------
     // Filter bar: quality + voice pills (modss-style)
     // -------------------------------------------------------
-    function buildFilters(variants, activeVoice, activeQuality, onChange) {
+    function buildFilters(variants, activeVoice, activeQuality, activeSeason, seasons, onChange) {
         var voices = [], qualities = [], voiceSeen = {}, qualSeen = {};
         for (var i = 0; i < variants.length; i++) {
             var vc = variants[i].voice || '';
@@ -339,11 +339,32 @@
             if (vc && !voiceSeen[vc]) { voiceSeen[vc] = true; voices.push(vc); }
             if (qc && !qualSeen[qc]) { qualSeen[qc] = true; qualities.push(qc); }
         }
-        var hasQual  = qualities.length > 1;
-        var hasVoice = voices.length > 1;
-        if (!hasQual && !hasVoice) { return null; }
+        var hasSeason = seasons && seasons.length > 0;
+        // Show quality/voice even with 1 option when season selector is visible (series)
+        var hasQual  = hasSeason ? qualities.length >= 1 : qualities.length > 1;
+        var hasVoice = hasSeason ? voices.length >= 1   : voices.length > 1;
+        if (!hasSeason && !hasQual && !hasVoice) { return null; }
 
         var wrap = jq('<div class="em-filters">');
+
+        // Season group (for TV series)
+        if (hasSeason) {
+            var sg = jq('<div class="em-filter-group">');
+            sg.append(jq('<span class="em-filter-label">').text('\u0421\u0435\u0437\u043e\u043d:'));
+            var sAll = jq('<div class="em-filter-btn selector">').text('\u0412\u0441\u0435');
+            if (!activeSeason) { sAll.addClass('active'); }
+            sAll.on('hover:enter click', function () { onChange('season', 0); });
+            sg.append(sAll);
+            for (var si = 0; si < seasons.length; si++) {
+                (function (s) {
+                    var btn = jq('<div class="em-filter-btn selector">').text(String(s));
+                    if (activeSeason === s) { btn.addClass('active'); }
+                    btn.on('hover:enter click', function () { onChange('season', s); });
+                    sg.append(btn);
+                })(seasons[si]);
+            }
+            wrap.append(sg);
+        }
 
         // Quality group
         if (hasQual) {
@@ -401,15 +422,17 @@
     // Component: easy_mod_variants
     // ==================================================================
     function EasyModVariants(object) {
-        this._object       = object || {};
-        this._movie        = (object && object.movie) ? object.movie : {};
-        this._render       = jq('<div class="easy-mod-page" style="padding:1.5em 2em;min-height:10em">');
-        this._scroll       = null;
-        this._dead         = false;
-        this._allVariants  = [];
-        this._filterVoice  = '';
+        this._object        = object || {};
+        this._movie         = (object && object.movie) ? object.movie : {};
+        this._render        = jq('<div class="easy-mod-page" style="padding:1.5em 2em;min-height:10em">');
+        this._scroll        = null;
+        this._dead          = false;
+        this._allVariants   = [];
+        this._filterVoice   = '';
         this._filterQuality = '';
-        this._season       = (object && object.season) || 0;  // 0 = not set / show selector
+        this._filterSeason  = 0;   // 0 = no season filter (all seasons)
+        this._isSeries      = false;
+        this._seriesSeasons = [];
     }
 
     EasyModVariants.prototype.create = function () { return this._render; };
@@ -435,31 +458,43 @@
         }
         self._movie = m;
 
+        // Detect TV series using only reliable TMDB signals
+        var isSeries = !!(m.first_air_date ||
+                          (m.number_of_seasons && parseInt(m.number_of_seasons, 10) > 0));
+        self._isSeries = isSeries;
+
+        // Build season list from TMDB data (used in the filter bar)
+        if (isSeries) {
+            var seasons = [];
+            if (m.seasons && m.seasons.length) {
+                m.seasons.forEach(function (s) {
+                    if ((s.season_number || 0) > 0) { seasons.push(s.season_number); }
+                });
+            }
+            if (!seasons.length) {
+                var ns = (m.number_of_seasons && parseInt(m.number_of_seasons, 10)) || 3;
+                for (var i = 1; i <= ns; i++) { seasons.push(i); }
+            }
+            self._seriesSeasons = seasons;
+        } else {
+            self._seriesSeasons = [];
+        }
+
+        self._fetchVariants();
+    };
+
+    EasyModVariants.prototype._fetchVariants = function () {
+        var self  = this;
+        var m     = self._movie || {};
         var title = m.title || m.name || m.original_title || m.original_name || '';
         var year  = m.year  || (m.release_date ? m.release_date.slice(0, 4) : '')
                             || (m.first_air_date ? m.first_air_date.slice(0, 4) : '');
         var tmdb  = m.id    || m.tmdb_id || '';
         var orig  = m.original_title || m.original_name || '';
 
-        // Detect TV series: has number_of_seasons or first_air_date or name (not title)
-        var isSeries = !!(m.number_of_seasons || m.first_air_date || (m.name && !m.title));
-        var totalSeasons = (m.number_of_seasons && parseInt(m.number_of_seasons, 10)) || 0;
-        // Use seasons array when available for accurate count
-        if (m.seasons && m.seasons.length) {
-            // Exclude specials (season_number == 0)
-            var realSeasons = m.seasons.filter(function (s) { return (s.season_number || 0) > 0; });
-            if (realSeasons.length > totalSeasons) { totalSeasons = realSeasons.length; }
-        }
-
-        // If this is a series and no season is selected yet, show the season picker
-        if (isSeries && !self._season) {
-            self._showSeasonPicker(m, title, totalSeasons);
-            return;
-        }
-
-        // Show loading state
-        var loadingLabel = title ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
-            (self._season ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._season : '') + '\u2026'
+        var loadingLabel = title
+            ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
+              (self._filterSeason ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._filterSeason : '') + '\u2026'
             : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
         self._render.html(loadingHtml(loadingLabel));
 
@@ -468,25 +503,13 @@
         if (year)  { params.year  = year; }
         if (tmdb)  { params.tmdb_id = tmdb; }
         if (orig && orig !== title) { params.original_title = orig; }
-        if (self._season) { params.season = self._season; }
+        if (self._filterSeason) { params.season = self._filterSeason; }
 
         apiGet('/variants', params, function (data) {
             if (self._dead) { return; }
             try {
                 var variants = (data && data.variants && data.variants.length) ? data.variants : [];
                 log('variants loaded N=' + variants.length);
-
-                if (!variants.length) {
-                    self._render.html(
-                        '<div class="online-empty" style="padding:2em">' +
-                        '<div class="online-empty__title">\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</div>' +
-                        '<div class="online-empty__time">\u00ab' + (title || '?') + '\u00bb \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d \u043d\u0438 \u0432 \u043e\u0434\u043d\u043e\u043c \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0435</div>' +
-                        '</div>'
-                    );
-                    try { Lampa.Controller.toggle('content'); } catch (e) {}
-                    return;
-                }
-
                 self._allVariants  = variants;
                 self._filterVoice  = '';
                 self._filterQuality = '';
@@ -507,59 +530,6 @@
         });
     };
 
-    EasyModVariants.prototype._showSeasonPicker = function (m, title, totalSeasons) {
-        var self = this;
-        // Build list of season numbers to show
-        var seasons = [];
-        if (m.seasons && m.seasons.length) {
-            m.seasons.forEach(function (s) {
-                if ((s.season_number || 0) > 0) { seasons.push(s.season_number); }
-            });
-        }
-        if (!seasons.length) {
-            // Fallback: use totalSeasons count or at least show seasons 1-5
-            var n = totalSeasons > 0 ? totalSeasons : 5;
-            for (var i = 1; i <= n; i++) { seasons.push(i); }
-        }
-
-        self._render.empty();
-        var wrap = jq('<div style="padding:0 .5em">');
-
-        // Header
-        wrap.append(
-            jq('<div class="online-empty__title" style="font-size:1.4em;margin-bottom:.8em">').text(
-                '\u0421\u0435\u0437\u043e\u043d — ' + (title || '\u0421\u0435\u0440\u0438\u0430\u043b')
-            )
-        );
-
-        // Season buttons
-        var btnWrap = jq('<div class="em-filters" style="gap:.6em;flex-wrap:wrap">');
-        seasons.forEach(function (sNum) {
-            var btn = jq('<div class="em-filter-btn selector">').text('\u0421\u0435\u0437\u043e\u043d ' + sNum);
-            btn.on('hover:enter click', function () {
-                self._season = sNum;
-                self._allVariants = [];
-                self._filterVoice = '';
-                self._filterQuality = '';
-                self.start();
-            });
-            btnWrap.append(btn);
-        });
-        wrap.append(btnWrap);
-
-        try {
-            var sc = new Lampa.Scroll({ mask: true, over: true });
-            sc.render().addClass('layer--wheight');
-            sc.body().append(wrap);
-            self._render.append(sc.render());
-            sc.start();
-            self._scroll = sc;
-        } catch (e) {
-            self._render.append(wrap);
-        }
-        try { Lampa.Controller.toggle('content'); } catch (e) {}
-    };
-
     EasyModVariants.prototype._renderVariants = function () {
         var self     = this;
         var m        = self._movie || {};
@@ -572,7 +542,7 @@
         self._scroll = null;
         self._render.empty();
 
-        // Apply filters
+        // Apply quality/voice client-side filters
         var shown = [];
         for (var k = 0; k < variants.length; k++) {
             var v = variants[k];
@@ -581,12 +551,26 @@
             shown.push(v);
         }
 
-        // Filter bar
-        var filterBar = buildFilters(variants, fv, fq, function (type, val) {
-            if (type === 'quality') { self._filterQuality = val; }
-            if (type === 'voice')   { self._filterVoice   = val; }
-            self._renderVariants();
-        });
+        // Filter bar (season + quality + voice)
+        var filterBar = buildFilters(
+            variants, fv, fq,
+            self._filterSeason, self._seriesSeasons || [],
+            function (type, val) {
+                if (type === 'quality') {
+                    self._filterQuality = val;
+                    self._renderVariants();
+                } else if (type === 'voice') {
+                    self._filterVoice = val;
+                    self._renderVariants();
+                } else if (type === 'season') {
+                    self._filterSeason  = val;
+                    self._allVariants   = [];
+                    self._filterVoice   = '';
+                    self._filterQuality = '';
+                    self._fetchVariants();
+                }
+            }
+        );
 
         if (!shown.length) {
             var emptyWrap = jq('<div style="padding:0 1em">');

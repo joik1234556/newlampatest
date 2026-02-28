@@ -783,7 +783,7 @@ class TestTorboxSearch:
 
 class TestJackettTorrentUrlFallback:
     def test_jackett_uses_link_when_no_magnet(self):
-        """JackettProvider should fall back to Link field when MagnetUri is absent."""
+        """JackettProvider rejects HTTP-only results — strict magnet-only policy."""
         import asyncio
         from unittest.mock import AsyncMock, MagicMock, patch
         from app.providers.jackett import JackettProvider
@@ -818,10 +818,8 @@ class TestJackettTorrentUrlFallback:
                 return await JackettProvider().search_variants("Test Movie", year=2023)
 
         variants = asyncio.get_event_loop().run_until_complete(run())
-        # Should get one variant using the Link URL as the magnet
-        assert len(variants) == 1
-        assert variants[0].magnet.startswith("https://")
-        assert "jackett.example.com/dl/torrent" in variants[0].magnet
+        # HTTP-only result must be rejected — strict magnet-only policy
+        assert len(variants) == 0
 
     def test_jackett_skips_result_with_no_link_or_magnet(self):
         """JackettProvider should skip results with neither MagnetUri nor Link."""

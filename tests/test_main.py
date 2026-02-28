@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 # Provide a dummy API key so the app starts without error
 import os
 os.environ.setdefault("TORBOX_API_KEY", "test-key-dummy")
+os.environ.setdefault("ENABLE_DEMO_PROVIDER", "1")
 
 from app.main import app  # noqa: E402
 

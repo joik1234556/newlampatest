@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from app.cache import variants_cache
-from app.config import VARIANTS_CACHE_TTL
+from app.config import ENABLE_DEMO_PROVIDER, VARIANTS_CACHE_TTL
 from app.models import Variant, VariantsResponse
 from app.providers.demo_provider import DemoProvider
 from app.providers.jackett import JackettProvider
@@ -92,13 +92,16 @@ async def get_variants(
 
     if not all_variants:
         logger.info("[Easy-Mod][Variants] no results from any provider for title=%s", title)
-        # Last resort: demo variants so the UI is always functional for testing
-        try:
-            demo = await DemoProvider().search_variants(title, year, tmdb_id, original_title=original_title)
-            all_variants.extend(demo)
-            logger.info("[Easy-Mod][Variants] provider=demo (fallback) returned %d variants", len(demo))
-        except Exception as exc:
-            logger.error("[Easy-Mod][Variants] provider=demo error: %s", exc)
+        # Last resort: demo variants — only when explicitly enabled (dev/testing)
+        if ENABLE_DEMO_PROVIDER:
+            try:
+                demo = await DemoProvider().search_variants(title, year, tmdb_id, original_title=original_title)
+                all_variants.extend(demo)
+                logger.info("[Easy-Mod][Variants] provider=demo (fallback) returned %d variants", len(demo))
+            except Exception as exc:
+                logger.error("[Easy-Mod][Variants] provider=demo error: %s", exc)
+        else:
+            logger.info("[Easy-Mod][Variants] DemoProvider disabled (ENABLE_DEMO_PROVIDER=0)")
 
     # Deduplicate by variant.id (stable SHA-1 hash from provider)
     seen: set[str] = set()

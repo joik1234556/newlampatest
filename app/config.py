@@ -57,3 +57,6 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 # Jackett integration (optional)
 JACKETT_URL: str = os.getenv("JACKETT_URL", "")
 JACKETT_API_KEY: str = os.getenv("JACKETT_API_KEY", "")
+
+# DemoProvider — set to "1" only in development / testing; off in production
+ENABLE_DEMO_PROVIDER: bool = os.getenv("ENABLE_DEMO_PROVIDER", "0") == "1"

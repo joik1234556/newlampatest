@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("TORBOX_API_KEY", "test-key-dummy")
+os.environ.setdefault("ENABLE_DEMO_PROVIDER", "1")
 
 from app.main import app  # noqa: E402
 
@@ -464,6 +465,47 @@ class TestVariantsService:
             assert v.id
             assert v.label
             assert v.magnet.startswith("magnet:")
+
+    def test_demo_provider_disabled_in_production(self):
+        """When ENABLE_DEMO_PROVIDER=0, /variants returns empty list if no real provider works."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def run():
+            # Simulate all real providers returning empty
+            with patch("app.services.variants.ENABLE_DEMO_PROVIDER", False), \
+                 patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.jackett.JackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]):
+                from app.services.variants import get_variants
+                return await get_variants("SomeUnknownFilm2099")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        # DemoProvider must NOT have injected fake variants
+        assert result.variants == []
+
+    def test_demo_provider_enabled_as_fallback(self):
+        """When ENABLE_DEMO_PROVIDER=1 and all real providers return empty, demo is used."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def run():
+            with patch("app.services.variants.ENABLE_DEMO_PROVIDER", True), \
+                 patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.jackett.JackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]):
+                from app.services.variants import get_variants
+                return await get_variants("SomeDemoFilm2099")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        # DemoProvider should have provided fallback variants
+        assert len(result.variants) > 0
 
 
 # ---------------------------------------------------------------------------

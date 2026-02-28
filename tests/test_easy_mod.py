@@ -697,3 +697,173 @@ class TestTorboxSearch:
             assert "magnet" in r
             assert "quality" in r
 
+    def test_torbox_search_with_year_and_original_title(self, client):
+        """Verify /torbox/search accepts year and original_title params."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        fake_variant = Variant(
+            id="xyz789",
+            label="Jackett • 1080P",
+            quality="1080p",
+            seeders=300,
+            size_mb=7000,
+            magnet="magnet:?xt=urn:btih:bbccddee001122334455667788990011aabbccdd",
+            voice="",
+            language="ru",
+            codec="H265",
+        )
+
+        with patch(
+            "app.providers.torrentio.TorrentioProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "app.providers.jackett.JackettProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[fake_variant],
+        ) as mock_jackett:
+            resp = client.get(
+                "/torbox/search?q=Oppenheimer&year=2023&original_title=Oppenheimer&tmdb_id=872585"
+            )
+            # Verify year and original_title were forwarded to the provider
+            call_kwargs = mock_jackett.call_args
+            assert call_kwargs is not None
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"][0]["id"] == "xyz789"
+
+
+# ---------------------------------------------------------------------------
+# Jackett provider — torrent URL fallback (Link field)
+# ---------------------------------------------------------------------------
+
+class TestJackettTorrentUrlFallback:
+    def test_jackett_uses_link_when_no_magnet(self):
+        """JackettProvider should fall back to Link field when MagnetUri is absent."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        fake_results = {
+            "Results": [
+                {
+                    "Title": "Test Movie 2023 1080p BluRay",
+                    "MagnetUri": "",
+                    "Link": "https://jackett.example.com/dl/torrent?id=abc123",
+                    "Seeders": 150,
+                    "Size": 8_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.config.JACKETT_URL", "http://jackett.example.com"), \
+                 patch("app.config.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett.JACKETT_URL", "http://jackett.example.com"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = fake_results
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                return await JackettProvider().search_variants("Test Movie", year=2023)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        # Should get one variant using the Link URL as the magnet
+        assert len(variants) == 1
+        assert variants[0].magnet.startswith("https://")
+        assert "jackett.example.com/dl/torrent" in variants[0].magnet
+
+    def test_jackett_skips_result_with_no_link_or_magnet(self):
+        """JackettProvider should skip results with neither MagnetUri nor Link."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        fake_results = {
+            "Results": [
+                {
+                    "Title": "Test Movie 2023 720p",
+                    "MagnetUri": "",
+                    "Link": "",
+                    "Seeders": 50,
+                    "Size": 2_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://jackett.example.com"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = fake_results
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                return await JackettProvider().search_variants("Test Movie", year=2023)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 0  # Skipped — no usable link
+
+
+# ---------------------------------------------------------------------------
+# /stream/start — accepts torrent file URL in magnet field
+# ---------------------------------------------------------------------------
+
+class TestStreamStartTorrentUrl:
+    def test_stream_start_accepts_torrent_url(self, client):
+        """POST /stream/start should accept an http(s):// torrent URL in magnet field."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import StreamJob
+
+        fake_job = StreamJob(
+            variant_id="v-url-1",
+            magnet="https://example.com/file.torrent",
+            magnet_hash="fakehash001",
+            title="Test Film",
+            state="queued",
+        )
+
+        with patch(
+            "app.services.stream.create_job",
+            new_callable=AsyncMock,
+            return_value=fake_job,
+        ):
+            resp = client.post(
+                "/stream/start",
+                json={
+                    "variant_id": "v-url-1",
+                    "magnet": "https://example.com/file.torrent",
+                    "title": "Test Film",
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_id"] == fake_job.job_id
+        assert body["status"] == "queued"
+
+    def test_stream_start_rejects_invalid_url(self, client):
+        """POST /stream/start should reject values that are neither magnet nor http URL."""
+        resp = client.post(
+            "/stream/start",
+            json={
+                "variant_id": "v-bad",
+                "magnet": "ftp://bad-protocol/file.torrent",
+                "title": "Test",
+            },
+        )
+        assert resp.status_code == 400
+

@@ -325,6 +325,8 @@ async def torbox_search(
     request: Request,
     q: str = Query(..., description="Movie or series title to search for"),
     tmdb_id: Optional[str] = Query(None, description="TMDB ID for Torrentio lookup"),
+    year: Optional[int] = Query(None, description="Release year for more accurate search"),
+    original_title: Optional[str] = Query(None, description="Original (English) title for Jackett search"),
 ):
     """
     Search for torrent variants by title using Torrentio and/or Jackett.
@@ -339,13 +341,15 @@ async def torbox_search(
     if not q.strip():
         return {"results": [], "query": q, "message": ""}
 
-    logger.info("torbox_search query=%s tmdb_id=%s", q, tmdb_id)
+    logger.info("torbox_search query=%s tmdb_id=%s year=%s", q, tmdb_id, year)
 
     providers = [TorrentioProvider(), JackettProvider()]
     all_variants = []
     for provider in providers:
         try:
-            results = await provider.search_variants(q, tmdb_id=tmdb_id)
+            results = await provider.search_variants(
+                q, year=year, tmdb_id=tmdb_id, original_title=original_title
+            )
             all_variants.extend(results)
         except Exception as exc:
             logger.warning("torbox_search provider=%s error: %s", provider.name, exc)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from urllib.parse import urlparse
 from typing import Any
 
 import httpx
@@ -61,6 +63,38 @@ async def add_magnet(magnet: str) -> dict:
     """Add a magnet link to TorBox and return the created torrent record."""
     result = await _post("/torrents/createtorrent", data={"magnet": magnet})
     logger.info("TorBox createtorrent response: %s", result)
+    return result
+
+
+async def add_torrent_from_url(torrent_url: str) -> dict:
+    """
+    Download a .torrent file from ``torrent_url`` and upload it to TorBox.
+    Used as a fallback when Jackett provides a Link instead of a MagnetUri.
+    """
+    logger.info("TorBox add_torrent_from_url url=%.80s", torrent_url)
+    async with httpx.AsyncClient(timeout=30) as dl_client:
+        file_resp = await dl_client.get(torrent_url, follow_redirects=True)
+        file_resp.raise_for_status()
+        torrent_bytes = file_resp.content
+
+    # Derive a meaningful filename from the URL for easier debugging
+    parsed_path = urlparse(torrent_url).path
+    filename = os.path.basename(parsed_path) or "file.torrent"
+    if not filename.endswith(".torrent"):
+        filename += ".torrent"
+
+    async with _client() as upload_client:
+        resp = await upload_client.post(
+            f"{TORBOX_BASE_URL}/torrents/createtorrent",
+            files={"torrent": (filename, torrent_bytes, "application/x-bittorrent")},
+        )
+        if not resp.is_success:
+            logger.error(
+                "TorBox upload torrent status=%d body=%.300s", resp.status_code, resp.text
+            )
+        resp.raise_for_status()
+        result = resp.json()
+    logger.info("TorBox createtorrent (url upload) response: %s", result)
     return result
 
 

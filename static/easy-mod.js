@@ -637,8 +637,8 @@
         var root = getActivityRoot();
         if (!root || !root.find) { return false; }
 
-        // Dedup guard
-        if (root.find('.view--easy_mod').length) { return true; }
+        // Remove stale button (it may hold a closure for a previously viewed film)
+        root.find('.view--easy_mod').remove();
 
         // Find button container (new Lampa layout first, then classic)
         var container = root.find('.full-start-new__buttons').first();
@@ -659,13 +659,16 @@
         btn.on('hover:enter click', function () {
             btn.html(BTN_SPIN + '<span>\u041f\u043e\u0438\u0441\u043a\u2026</span>');
 
-            var movie = m;
+            // Always re-read current movie from Activity at click time to avoid stale closures
+            var movie = {};
             try {
-                var actData = Lampa.Activity.data && Lampa.Activity.data();
-                if (actData && (actData.movie || actData.card)) {
-                    movie = actData.movie || actData.card;
-                }
+                var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                movie = (act && (act.movie || act.card || act.data)) || {};
             } catch (ex) {}
+            if (!movie.title && !movie.name && !movie.id) {
+                // Fallback to injected closure value
+                movie = m;
+            }
 
             log('open variants for', (movie && (movie.title || movie.name)) || '?');
 

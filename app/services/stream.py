@@ -183,13 +183,18 @@ async def _process_job(job_id: str) -> None:
         return
 
     try:
-        # ── Add magnet to TorBox ──────────────────────────────────────────
+        # ── Add magnet or torrent file URL to TorBox ──────────────────────
+        is_torrent_url = job.magnet.startswith("http://") or job.magnet.startswith("https://")
         logger.info(
-            "[Easy-Mod][TorBox] add_magnet job_id=%s magnet=%.60s",
+            "[Easy-Mod][TorBox] %s job_id=%s value=%.60s",
+            "add_torrent_url" if is_torrent_url else "add_magnet",
             job_id, job.magnet,
         )
         try:
-            result = await torbox.add_magnet(job.magnet)
+            if is_torrent_url:
+                result = await torbox.add_torrent_from_url(job.magnet)
+            else:
+                result = await torbox.add_magnet(job.magnet)
         except RetryError as retry_err:
             cause = retry_err.last_attempt.exception()
             if cause is not None and hasattr(cause, "response"):

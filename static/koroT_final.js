@@ -174,11 +174,20 @@
     function openTorBox(movie) {
         try {
             var title = (movie && movie.title) ? movie.title : '';
-            console.log('[TorBox] openTorBox for:', title);
+            var origTitle = (movie && movie.original_title) ? movie.original_title : '';
+            var year = (movie && (movie.year || movie.release_date)) ?
+                String(movie.year || movie.release_date).slice(0, 4) : '';
+            var tmdbId = (movie && movie.id) ? String(movie.id) : '';
+            console.log('[TorBox] openTorBox for:', title, '(orig:', origTitle, 'year:', year, ')');
 
             Lampa.Loading.start('\u041f\u043e\u0438\u0441\u043a TorBox\u2026');
 
-            apiGet('/torbox/search', { q: title }, function (data) {
+            var searchParams = { q: title };
+            if (year)      { searchParams.year = year; }
+            if (tmdbId)    { searchParams.tmdb_id = tmdbId; }
+            if (origTitle && origTitle !== title) { searchParams.original_title = origTitle; }
+
+            apiGet('/torbox/search', searchParams, function (data) {
                 try {
                     Lampa.Loading.stop();
 
@@ -308,10 +317,8 @@
                 return;
             }
 
-            // Avoid duplicate buttons
-            if (container.find('.torbox-btn').length) {
-                return;
-            }
+            // Remove any stale button (it may belong to a previously viewed film's closure)
+            container.find('.torbox-btn').remove();
 
             var btn = $('<div>')
                 .addClass('full-start__button selector torbox-btn')

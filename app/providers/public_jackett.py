@@ -102,8 +102,13 @@ class PublicJackettProvider(BaseProvider):
                 count_before = len(variants)
                 for r in results:
                     magnet = r.get("MagnetUri") or ""
+                    # Fall back to torrent file URL when MagnetUri is absent
                     if not magnet.startswith("magnet:"):
-                        continue
+                        link = r.get("Link") or r.get("link") or ""
+                        if link.startswith("http"):
+                            magnet = link
+                        else:
+                            continue
                     if magnet in seen_magnets:
                         continue
                     seen_magnets.add(magnet)

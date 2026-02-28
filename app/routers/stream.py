@@ -28,8 +28,8 @@ async def stream_start(
     - ``{ job_id, status: "ready", direct_url }``  — cache hit, play now
     - ``{ job_id, status: "queued" }``              — job created, poll /stream/status
     """
-    if not body.magnet.startswith("magnet:"):
-        raise HTTPException(status_code=400, detail="Invalid magnet link")
+    if not body.magnet.startswith(("magnet:", "http://", "https://")):
+        raise HTTPException(status_code=400, detail="Invalid magnet or torrent URL — must start with 'magnet:', 'http://', or 'https://'")
     if not body.variant_id:
         raise HTTPException(status_code=400, detail="variant_id is required")
 

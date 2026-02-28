@@ -337,7 +337,7 @@ async def torbox_search(
     Each result: ``{ id, label, quality, seeders, size_mb, magnet }``.
     """
     if not q.strip():
-        return {"results": [], "query": q}
+        return {"results": [], "query": q, "message": ""}
 
     logger.info("torbox_search query=%s tmdb_id=%s", q, tmdb_id)
 
@@ -361,6 +361,7 @@ async def torbox_search(
     return {
         "results": [v.model_dump() for v in all_variants],
         "query": q,
+        "message": "",
     }
 
 

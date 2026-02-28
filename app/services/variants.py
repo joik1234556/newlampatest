@@ -13,6 +13,7 @@ from app.cache import variants_cache
 from app.config import VARIANTS_CACHE_TTL
 from app.models import Variant, VariantsResponse
 from app.providers.jackett import JackettProvider
+from app.providers.public_jackett import PublicJackettProvider
 from app.providers.torrentio import TorrentioProvider
 
 logger = logging.getLogger(__name__)
@@ -57,18 +58,36 @@ async def get_variants(
     # Build provider pipeline:
     #   1. TorrentioProvider – real results when tmdb_id is available (no config needed)
     #   2. JackettProvider   – real results when JACKETT_URL + JACKETT_API_KEY are set
+    #   3. PublicJackettProvider – fallback using public jac.red / jacred.xyz servers
     providers = [TorrentioProvider(), JackettProvider()]
     all_variants: list[Variant] = []
+    jackett_found = 0
     for provider in providers:
         try:
             results = await provider.search_variants(title, year, tmdb_id, original_title=original_title)
             all_variants.extend(results)
+            if provider.name == "jackett":
+                jackett_found = len(results)
             logger.info(
                 "[Easy-Mod][Variants] provider=%s returned %d variants",
                 provider.name, len(results),
             )
         except Exception as exc:
             logger.error("[Easy-Mod][Variants] provider=%s error: %s", provider.name, exc)
+
+    # If private Jackett returned nothing, try public Jackett servers as fallback
+    if jackett_found == 0:
+        try:
+            pub_results = await PublicJackettProvider().search_variants(
+                title, year, tmdb_id, original_title=original_title
+            )
+            all_variants.extend(pub_results)
+            logger.info(
+                "[Easy-Mod][Variants] provider=public_jackett returned %d variants",
+                len(pub_results),
+            )
+        except Exception as exc:
+            logger.error("[Easy-Mod][Variants] provider=public_jackett error: %s", exc)
 
     if not all_variants:
         logger.info("[Easy-Mod][Variants] no results from any provider for title=%s", title)

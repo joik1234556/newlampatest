@@ -23,6 +23,7 @@ class Variant(BaseModel):
     seeders: int = Field(0, description="Number of seeders")
     codec: str = Field("H264", description="Video codec")
     magnet: str = Field("", description="Magnet link")
+    torrent_url: Optional[str] = Field(None, description="Torrent file download URL (alternative to magnet)")
 
 
 class VariantsResponse(BaseModel):

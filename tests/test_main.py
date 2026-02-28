@@ -225,7 +225,7 @@ class TestTorboxGet:
 
     def test_torbox_get_missing_param(self, client):
         resp = client.get("/torbox/get")
-        assert resp.status_code == 422
+        assert resp.status_code == 400
 
     def test_torbox_get_ready(self, client):
         fake_files = [{"title": "film.mkv", "quality": "1080p", "url": "https://cdn.torbox.app/film.mkv", "size": 1000}]

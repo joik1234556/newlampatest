@@ -71,9 +71,29 @@ async def add_torrent_from_url(torrent_url: str) -> dict:
     Download a .torrent file from ``torrent_url`` and upload it to TorBox.
     Used as a fallback when Jackett provides a Link instead of a MagnetUri.
     """
+    # Validate URL to prevent SSRF — only allow http(s) to public hosts
+    _parsed = urlparse(torrent_url)
+    if _parsed.scheme not in ("http", "https"):
+        raise ValueError(f"torrent_url must use http or https scheme, got: {_parsed.scheme!r}")
+    hostname = _parsed.hostname or ""
+    if not hostname:
+        raise ValueError("torrent_url has no hostname")
+    # Block internal/private networks
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError(f"torrent_url resolves to a private/internal address: {hostname}")
+    except ValueError as exc:
+        # Not a raw IP — check for localhost by name
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1"):
+            raise ValueError(f"torrent_url hostname not allowed: {hostname}") from exc
     logger.info("TorBox add_torrent_from_url url=%.80s", torrent_url)
     async with httpx.AsyncClient(timeout=30) as dl_client:
-        file_resp = await dl_client.get(torrent_url, follow_redirects=True)
+        # follow_redirects=False prevents redirect-based SSRF
+        file_resp = await dl_client.get(torrent_url, follow_redirects=False)
+        if file_resp.is_redirect:
+            raise ValueError("torrent_url returned a redirect; redirects are not followed for security")
         file_resp.raise_for_status()
         torrent_bytes = file_resp.content
 
@@ -100,9 +120,16 @@ async def add_torrent_from_url(torrent_url: str) -> dict:
 
 async def request_download_link(torrent_id: int | str, file_id: int | str) -> str | None:
     """Request a direct download URL for a file inside a torrent."""
+    # TorBox requires the API token both via the Authorization header AND as the
+    # ?token= query parameter for the /requestdl endpoint.
+    logger.debug("TorBox requestdl using Authorization header + token param")
     result = await _get(
         "/torrents/requestdl",
-        params={"torrent_id": str(torrent_id), "file_id": str(file_id)},
+        params={
+            "torrent_id": str(torrent_id),
+            "file_id": str(file_id),
+            "token": TORBOX_API_KEY,
+        },
     )
     logger.info("TorBox requestdl response: %s", result)
     return result.get("data")

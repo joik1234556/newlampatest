@@ -56,8 +56,8 @@ logger = logging.getLogger(__name__)
 _MAX_POLL_ATTEMPTS: int = 12
 _POLL_DELAY_SECONDS: int = 5
 
-# TorBox polling settings for /torbox/get (long, ~4 min)
-_TORBOX_POLL_ATTEMPTS: int = 48   # 48 × 5 s = 240 s ≈ 4 min
+# TorBox polling settings for /torbox/get (short, ~60 s)
+_TORBOX_POLL_ATTEMPTS: int = 12   # 12 × 5 s = 60 s
 _TORBOX_POLL_DELAY: int = 5
 
 
@@ -373,10 +373,11 @@ async def torbox_search(
 @limiter.limit(RATE_LIMIT)
 async def torbox_get(
     request: Request,
-    magnet: str = Query(..., description="Magnet link to resolve via TorBox"),
+    magnet: Optional[str] = Query(None, description="Magnet link to resolve via TorBox"),
+    torrent_url: Optional[str] = Query(None, description="Torrent file URL to resolve via TorBox"),
 ):
     """
-    Add a magnet to TorBox, poll until files are ready (up to 4 minutes),
+    Add a magnet or torrent URL to TorBox, poll until files are ready (up to 60 seconds),
     and return direct HTTPS download links.
 
     Returns ``{ status: "ready"|"processing"|"error", files: [...], torrent_id }``.
@@ -386,23 +387,38 @@ async def torbox_get(
     if not TORBOX_API_KEY:
         raise HTTPException(status_code=503, detail="TorBox API key not configured")
 
-    if not magnet.startswith("magnet:"):
+    if not magnet and not torrent_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide 'magnet' (magnet link) or 'torrent_url' (torrent file URL)",
+        )
+
+    if magnet and not magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="Invalid magnet link — must start with 'magnet:'")
 
-    logger.info("torbox_get magnet=%s...", magnet[:60])
+    if torrent_url and not (torrent_url.startswith("http://") or torrent_url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="Invalid torrent_url — must start with 'http://' or 'https://'")
 
-    # Check cache first (avoids adding duplicate)
-    infohash = _extract_infohash(magnet)
-    if infohash:
-        cached = await torbox.check_cached(infohash)
-        if cached:
-            logger.info("torbox_get: TorBox cache hit for %s", infohash)
+    is_torrent_url = bool(torrent_url and not magnet)
+    source = torrent_url if is_torrent_url else magnet
+    logger.info("torbox_get %s=%.60s", "torrent_url" if is_torrent_url else "magnet", source)
 
-    # Add magnet to TorBox
+    # For magnet: check cache first (avoids adding duplicate)
+    if magnet:
+        infohash = _extract_infohash(magnet)
+        if infohash:
+            cached = await torbox.check_cached(infohash)
+            if cached:
+                logger.info("torbox_get: TorBox cache hit for %s", infohash)
+
+    # Add to TorBox
     try:
-        result = await torbox.add_magnet(magnet)
+        if is_torrent_url:
+            result = await torbox.add_torrent_from_url(torrent_url)
+        else:
+            result = await torbox.add_magnet(magnet)
     except Exception as exc:
-        logger.error("torbox_get add_magnet error: %s", exc)
+        logger.error("torbox_get add error: %s", exc)
         return JSONResponse(
             status_code=502,
             content={"status": "error", "files": [], "error": str(exc)},
@@ -419,11 +435,12 @@ async def torbox_get(
                 "status": "processing",
                 "files": [],
                 "torrent_id": None,
+                "direct_url": None,
                 "message": "Торрент принят, но ID не возвращён. Повторите позже.",
             },
         )
 
-    # Poll for readiness — up to 4 minutes (48 × 5 s)
+    # Poll for readiness — up to 60 seconds (12 × 5 s)
     for attempt in range(_TORBOX_POLL_ATTEMPTS):
         await asyncio.sleep(_TORBOX_POLL_DELAY)
 
@@ -449,6 +466,7 @@ async def torbox_get(
                     "status": "ready",
                     "files": files,
                     "torrent_id": torrent_id,
+                    "direct_url": files[0].get("url") if files else None,
                 }
 
     # Timed out — tell client to retry
@@ -459,6 +477,8 @@ async def torbox_get(
             "status": "processing",
             "files": [],
             "torrent_id": torrent_id,
+            "direct_url": None,
+            "error": "polling_timeout",
             "message": "Торрент ещё загружается. Повторите запрос через несколько минут.",
         },
     )

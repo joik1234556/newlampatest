@@ -907,3 +907,143 @@ class TestStreamStartTorrentUrl:
         )
         assert resp.status_code == 400
 
+
+
+# ---------------------------------------------------------------------------
+# New: requestdl token param
+# ---------------------------------------------------------------------------
+
+class TestRequestDlToken:
+    def test_requestdl_includes_token_param(self):
+        """request_download_link must include 'token' as a query param."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch, call
+        from app import torbox as tb
+
+        async def run():
+            with patch("app.torbox.TORBOX_API_KEY", "my-secret-key"), \
+                 patch("app.torbox._get", new_callable=AsyncMock) as mock_get:
+                mock_get.return_value = {"data": "https://cdn.torbox.app/file.mkv"}
+                result = await tb.request_download_link("42", "1")
+                return result, mock_get.call_args
+
+        result, call_args = asyncio.get_event_loop().run_until_complete(run())
+        assert result == "https://cdn.torbox.app/file.mkv"
+        # Verify 'token' was in the params kwarg
+        params = call_args[1].get("params") or call_args[0][1]
+        assert "token" in params
+
+
+# ---------------------------------------------------------------------------
+# New: /torbox/get with torrent_url
+# ---------------------------------------------------------------------------
+
+class TestTorboxGetTorrentUrl:
+    def test_torbox_get_accepts_torrent_url(self, client):
+        """GET /torbox/get?torrent_url=... should work like the magnet path."""
+        from unittest.mock import AsyncMock, patch
+
+        fake_files = [{"title": "film.mkv", "quality": "1080p",
+                       "url": "https://cdn.torbox.app/film.mkv", "size": 1000}]
+
+        with (
+            patch("app.main.torbox.add_torrent_from_url",
+                  new_callable=AsyncMock,
+                  return_value={"data": {"torrent_id": "99"}}) as mock_add,
+            patch("app.main.torbox.get_torrent_by_id",
+                  new_callable=AsyncMock,
+                  return_value={
+                      "id": "99",
+                      "download_state": "seeding",
+                      "files": [{"id": 1, "name": "film.mkv"}],
+                  }),
+            patch("app.main.torbox.build_direct_links",
+                  new_callable=AsyncMock,
+                  return_value=fake_files),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = client.get(
+                "/torbox/get?torrent_url=https://jackett.example.com/dl/file.torrent"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        assert len(body["files"]) == 1
+        mock_add.assert_called_once()
+
+    def test_torbox_get_rejects_invalid_torrent_url(self, client):
+        """Non-http torrent_url must be rejected."""
+        resp = client.get("/torbox/get?torrent_url=ftp://bad.example/file.torrent")
+        assert resp.status_code == 400
+
+    def test_torbox_get_missing_both_params(self, client):
+        """No magnet and no torrent_url → 400."""
+        resp = client.get("/torbox/get")
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# New: top-3 variants per quality tier
+# ---------------------------------------------------------------------------
+
+class TestVariantsTop3:
+    def test_variants_at_most_3(self, client):
+        """After sorting, at most 3 variants are returned (one per quality tier)."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+        from app.providers.torrentio import TorrentioProvider
+
+        fake_variants = [
+            Variant(id="v1", label="4K A", quality="2160p", seeders=50, magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Variant(id="v2", label="4K B", quality="2160p", seeders=30, magnet="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+            Variant(id="v3", label="1080 A", quality="1080p", seeders=200, magnet="magnet:?xt=urn:btih:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
+            Variant(id="v4", label="1080 B", quality="1080p", seeders=100, magnet="magnet:?xt=urn:btih:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"),
+            Variant(id="v5", label="720p A", quality="720p", seeders=80, magnet="magnet:?xt=urn:btih:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"),
+        ]
+
+        with patch.object(
+            TorrentioProvider,
+            "search_variants",
+            new=AsyncMock(return_value=fake_variants),
+        ):
+            resp = client.get("/variants?title=Top3TestFilmXYZ123&year=2025")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        # Must have at most 3 (one per tier)
+        assert len(variants) <= 3
+        # Each quality tier appears at most once
+        qualities = [v["quality"] for v in variants]
+        assert len(qualities) == len(set(qualities))
+
+    def test_variants_quality_filter(self, client):
+        """?quality=1080p returns only 1080p variants."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+        from app.providers.torrentio import TorrentioProvider
+
+        fake_variants = [
+            Variant(id="f1", label="4K", quality="2160p", seeders=50,
+                    magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Variant(id="f2", label="1080", quality="1080p", seeders=200,
+                    magnet="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+        ]
+
+        with patch.object(
+            TorrentioProvider,
+            "search_variants",
+            new=AsyncMock(return_value=fake_variants),
+        ):
+            resp = client.get("/variants?title=QualityFilterTestXYZ456&year=2025&quality=1080p")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        assert all(v["quality"] == "1080p" for v in variants)
+
+    def test_variant_model_has_torrent_url(self):
+        """Variant model must have an optional torrent_url field."""
+        from app.models import Variant
+        v = Variant(id="x", label="Test", magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB",
+                    torrent_url="https://example.com/file.torrent")
+        assert v.torrent_url == "https://example.com/file.torrent"
+        # Default is None
+        v2 = Variant(id="y", label="Test2", magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB")
+        assert v2.torrent_url is None

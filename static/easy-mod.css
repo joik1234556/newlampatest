@@ -11,6 +11,23 @@
     flex-shrink: 0;
 }
 
+/* Modss-style spinner inside the button while variants load */
+.view--easy_mod .easy-mod-btn-spinner {
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 0.3em;
+}
+.view--easy_mod span {
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* Button hover/focus — scale like modss */
+.view--easy_mod.focus {
+    transform: scale(1.03);
+    transition: transform 0.2s ease;
+}
+
 /* Page wrapper (variants + wait) */
 .easy-mod-page {
     padding: 1.5em 2em;

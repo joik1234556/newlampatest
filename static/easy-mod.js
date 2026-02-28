@@ -7,7 +7,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    console.log('[Easy-Mod] loaded v4.17');
+    console.log('[Easy-Mod] loaded v4.18');
 
     // -----------------------------------------------------------------
     // Config — change only this line to point at a different server
@@ -569,6 +569,10 @@
         log('wait destroyed');
     };
 
+    // Animated SVG spinner (same style as modss balanser loader, smaller)
+    var BTN_SPINNER = '<svg class="easy-mod-btn-spinner" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 100 100"><circle cx="50" cy="50" fill="none" stroke="currentColor" stroke-width="8" r="35" stroke-dasharray="164.93 56.98"><animateTransform attributeName="transform" type="rotate" repeatCount="indefinite" dur="0.9s" values="0 50 50;360 50 50" keyTimes="0;1"/></circle></svg>';
+    var BTN_ICO = '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+
     // ==================================================================
     // Button injection into film detail page (modss-style)
     // ==================================================================
@@ -605,10 +609,12 @@
         } catch (ex) {}
 
         var btn = jq('<div class="full-start__button selector view--easy_mod">')
-            .append(jq('<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>'))
+            .append(jq(BTN_ICO))
             .append(jq('<span>').text('Easy-Mod'));
 
         btn.on('hover:enter click', function () {
+            // Show modss-style loading spinner inside button
+            btn.html(BTN_SPINNER + '<span>Поиск…</span>');
             // Refresh movie data at click time
             var movie = m;
             try {
@@ -616,6 +622,10 @@
                 if (actData && (actData.movie || actData.card)) movie = actData.movie || actData.card;
             } catch (ex) {}
             log('open variants for', (movie && (movie.title || movie.name)) || '?');
+            // Restore button after a short delay (Activity.push navigates away)
+            setTimeout(function () {
+                try { btn.html(BTN_ICO + '<span>Easy-Mod</span>'); } catch (e) {}
+            }, 1500);
             try {
                 Lampa.Activity.push({
                     component: 'easy_mod_variants',
@@ -625,6 +635,7 @@
                 });
             } catch (err) {
                 log('Activity.push error', err.message);
+                try { btn.html(BTN_ICO + '<span>Easy-Mod</span>'); } catch (e) {}
             }
         });
 

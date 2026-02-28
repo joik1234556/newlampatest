@@ -13,7 +13,7 @@ from app.cache import variants_cache
 from app.config import ENABLE_DEMO_PROVIDER, VARIANTS_CACHE_TTL
 from app.models import Variant, VariantsResponse
 from app.providers.demo_provider import DemoProvider
-from app.providers.jackett import JackettProvider
+from app.providers.jackett import JackettProvider, MAX_VARIANTS
 from app.providers.public_jackett import PublicJackettProvider
 from app.providers.torrentio import TorrentioProvider
 
@@ -122,33 +122,16 @@ async def get_variants(
 
     deduped.sort(key=_sort_key, reverse=True)
 
-    # Keep at most one best variant per quality tier (2160p → 1080p → 720p),
-    # giving the user a clean "4K / 1080p / 720p" choice — three options max.
-    _TIERS = ["2160p", "1080p", "720p"]
-    top3: list[Variant] = []
-    seen_tier: set[str] = set()
-    for v in deduped:
-        tier = v.quality.lower()
-        if tier not in seen_tier and tier in _TIERS:
-            seen_tier.add(tier)
-            top3.append(v)
-        if len(top3) == len(_TIERS):
-            break
-    # If some tiers are missing, fill in with remaining variants (any quality)
-    # so we always surface the best available results.
-    if len(top3) < len(_TIERS):
-        extra_seen = {v.id for v in top3}
-        for v in deduped:
-            if v.id not in extra_seen:
-                top3.append(v)
-                extra_seen.add(v.id)
+    # Return all variants (up to MAX_VARIANTS), sorted by quality+seeders.
+    # The filter bar in the frontend lets the user narrow down by quality/voice.
+    final = deduped[:MAX_VARIANTS]
 
-    response = VariantsResponse(title=title, year=year, variants=top3)
+    response = VariantsResponse(title=title, year=year, variants=final)
     # Store as dict so Redis serialisation is straightforward
     await variants_cache.aset(key, response.model_dump(), ttl=VARIANTS_CACHE_TTL)
     logger.info(
         "[Easy-Mod][Variants] returning %d variants for title=%s",
-        len(top3), title,
+        len(final), title,
     )
     return response
 

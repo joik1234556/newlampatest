@@ -993,8 +993,8 @@ class TestTorboxGetTorrentUrl:
 # ---------------------------------------------------------------------------
 
 class TestVariantsTop3:
-    def test_variants_at_most_3(self, client):
-        """After sorting, at most 3 variants are returned (one per quality tier)."""
+    def test_variants_at_most_max(self, client):
+        """After sorting, at most 20 variants are returned; all 5 fake variants come through."""
         from unittest.mock import AsyncMock, patch
         from app.models import Variant
         from app.providers.torrentio import TorrentioProvider
@@ -1015,11 +1015,8 @@ class TestVariantsTop3:
             resp = client.get("/variants?title=Top3TestFilmXYZ123&year=2025")
         assert resp.status_code == 200
         variants = resp.json()["variants"]
-        # Must have at most 3 (one per tier)
-        assert len(variants) <= 3
-        # Each quality tier appears at most once
-        qualities = [v["quality"] for v in variants]
-        assert len(qualities) == len(set(qualities))
+        # All 5 variants must be returned (we no longer cap at one-per-tier)
+        assert len(variants) == 5
 
     def test_variants_quality_filter(self, client):
         """?quality=1080p returns only 1080p variants."""

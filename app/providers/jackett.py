@@ -29,10 +29,14 @@ from app.providers.base import BaseProvider
 logger = logging.getLogger(__name__)
 
 _QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)
+_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 # Newznab/Jackett movie category range
 _MOVIE_CAT_MIN = 2000
 _MOVIE_CAT_MAX = 2999
+
+# Maximum variants returned per provider call — stops early HTTP requests
+MAX_VARIANTS = 20
 
 
 def _guess_quality(name: str) -> str:
@@ -64,7 +68,7 @@ def _normalize(text: str) -> str:
     return text
 
 
-def _title_matches(query: str, candidate: str, threshold: float = 0.70) -> bool:
+def _title_matches(query: str, candidate: str, threshold: float = 0.55) -> bool:
     """Return True when *candidate* title is sufficiently similar to *query*."""
     q = _normalize(query)
     c = _normalize(candidate)
@@ -82,18 +86,63 @@ def _title_matches(query: str, candidate: str, threshold: float = 0.70) -> bool:
 
 
 def _is_movie_category(cats: "list[int] | int | None") -> bool:
-    """Return True if the result belongs to a movie category or has no category info."""
+    """Return True if the result belongs to a movie category or has no/unknown category."""
     if not cats:
         return True  # no category info — don't discard
     if isinstance(cats, int):
         cats = [cats]
-    return any(_MOVIE_CAT_MIN <= c <= _MOVIE_CAT_MAX for c in cats)
+    # Accept if any entry is zero (unclassified), or falls in the movie range
+    return any(c == 0 or _MOVIE_CAT_MIN <= c <= _MOVIE_CAT_MAX for c in cats)
+
+
+def _year_ok(title_r: str, year: Optional[int]) -> bool:
+    """
+    Return True when the torrent title is acceptable for the requested year.
+    - If no year was requested, always accept.
+    - If the torrent title contains no year at all, accept (many valid torrents omit it).
+    - If it contains a year, accept with ±1 tolerance.
+    """
+    if not year:
+        return True
+    years_in_title = [int(m) for m in _YEAR_RE.findall(title_r)]
+    if not years_in_title:
+        return True  # no year in torrent title — keep it
+    return any(abs(y - year) <= 1 for y in years_in_title)
 
 
 class JackettProvider(BaseProvider):
     """Fetch torrent search results from a Jackett instance."""
 
     name = "jackett"
+
+    def _build_queries(
+        self,
+        title: str,
+        year: Optional[int],
+        original_title: Optional[str],
+    ) -> list[str]:
+        """Build ordered list of query strings to try, most specific first."""
+        seen: set[str] = set()
+        queries: list[str] = []
+
+        def add(q: str) -> None:
+            key = q.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                queries.append(q)
+
+        # Primary: title alone (best recall — year is passed as separate param)
+        add(title)
+        # Secondary: original_title alone (catches English-named torrents)
+        if original_title and original_title.lower() != title.lower():
+            add(original_title)
+        # Tertiary: title + year (some indexers need it for disambiguation)
+        if year:
+            add(f"{title} {year}")
+            if original_title and original_title.lower() != title.lower():
+                add(f"{original_title} {year}")
+
+        return queries
 
     async def search_variants(
         self,
@@ -106,23 +155,21 @@ class JackettProvider(BaseProvider):
             logger.debug("[JackettProvider] not configured, skipping")
             return []
 
-        # Build list of queries: primary title first, then original_title if it differs
-        queries: list[str] = []
-        primary = f"{title} {year}" if year else title
-        queries.append(primary)
-        if original_title and original_title.lower() != title.lower():
-            queries.append(f"{original_title} {year}" if year else original_title)
-
+        queries = self._build_queries(title, year, original_title)
         url = f"{JACKETT_URL.rstrip('/')}/api/v2.0/indexers/all/results"
         seen_magnets: set[str] = set()
         variants: list[Variant] = []
 
         for query in queries:
-            params = {
+            params: dict[str, str] = {
                 "apikey": JACKETT_API_KEY,
                 "t": "search",
                 "q": query,
-                "cat": "2000",  # Movies only
+                # Include all Newznab movie sub-categories:
+                # 2000=Movies, 2010=Movies/Foreign, 2020=Movies/Other,
+                # 2030=Movies/SD, 2040=Movies/HD, 2045=Movies/UHD,
+                # 2050=Movies/BluRay, 2060=Movies/3D
+                "cat": "2000,2010,2020,2030,2040,2045,2050,2060",
             }
             logger.info("[JackettProvider] GET %s query=%s", url, query)
 
@@ -150,43 +197,31 @@ class JackettProvider(BaseProvider):
                     )
                     continue
 
-                # ── 2. Seeders > 0 ───────────────────────────────────────────
-                seeders = int(r.get("Seeders", 0) or 0)
-                if seeders == 0:
-                    logger.debug("[JackettProvider] skip '%s': zero seeders", title_r)
-                    continue
-
-                # ── 3. Year filter ───────────────────────────────────────────
-                if year and not re.search(r"\b" + str(year) + r"\b", title_r):
+                # ── 2. Year soft-filter (±1 year, skip if no year in title) ──
+                if not _year_ok(title_r, year):
                     logger.debug(
-                        "[JackettProvider] skip '%s': year %s not in title",
+                        "[JackettProvider] skip '%s': year mismatch (want %s)",
                         title_r, year,
                     )
                     continue
 
-                # ── 4. Title similarity ≥ 70 % ───────────────────────────────
-                search_q = original_title if original_title else title
-                if not _title_matches(search_q, title_r):
+                # ── 3. Title similarity — check both title and original_title ─
+                matched = _title_matches(title, title_r)
+                if not matched and original_title:
+                    matched = _title_matches(original_title, title_r)
+                if not matched:
                     logger.debug(
-                        "[JackettProvider] skip '%s': title mismatch for query '%s'",
-                        title_r, search_q,
+                        "[JackettProvider] skip '%s': title mismatch for '%s'",
+                        title_r, title,
                     )
                     continue
 
-                # ── 5. Movie category ────────────────────────────────────────
-                cats = r.get("Category") or []
-                if not _is_movie_category(cats):
-                    logger.debug(
-                        "[JackettProvider] skip '%s': non-movie category %s",
-                        title_r, cats,
-                    )
-                    continue
-
-                # ── 6. Deduplication ─────────────────────────────────────────
+                # ── 4. Deduplication ─────────────────────────────────────────
                 if magnet in seen_magnets:
                     continue
                 seen_magnets.add(magnet)
 
+                seeders = int(r.get("Seeders", 0) or 0)
                 size_bytes = int(r.get("Size", 0) or 0)
                 size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
                 quality = _guess_quality(title_r)
@@ -214,6 +249,10 @@ class JackettProvider(BaseProvider):
             logger.info(
                 "[JackettProvider] query=%s found %d new results", query, len(variants) - count_before
             )
+
+            # Stop early once we have enough results to avoid unnecessary requests
+            if len(variants) >= MAX_VARIANTS:
+                break
 
         logger.info(
             "[JackettProvider] total %d results for title='%s' original_title='%s'",

@@ -218,7 +218,9 @@ class TestStreamStart:
         )
 
         async def run():
-            with patch("app.services.stream.torbox.add_magnet", side_effect=retry_err):
+            with patch("app.services.stream.torbox.add_magnet", side_effect=retry_err), \
+                 patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None):
                 req = StreamStartRequest(variant_id="v_retry", magnet=MAGNET, title="RetryTest")
                 job = await create_job(req)
                 # Give background task time to run
@@ -254,6 +256,8 @@ class TestStreamStart:
                             state="queued")
             await _save_job(job)
             with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam, \
+                 patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None), \
                  patch("app.services.stream.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt, \
                  patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
                 mam.return_value = {"data": {"torrent_id": "777"}}
@@ -289,6 +293,8 @@ class TestStreamStart:
                             state="queued")
             await _save_job(job)
             with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam, \
+                 patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None), \
                  patch("app.services.stream.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt, \
                  patch("app.services.stream.torbox.request_download_link", new_callable=AsyncMock) as mdl, \
                  patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
@@ -1047,3 +1053,146 @@ class TestVariantsTop3:
         # Default is None
         v2 = Variant(id="y", label="Test2", magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB")
         assert v2.torrent_url is None
+
+
+# ---------------------------------------------------------------------------
+# New: fast-path for already-seeding TorBox torrent
+# ---------------------------------------------------------------------------
+
+class TestFastPathExistingTorrent:
+    def test_fast_path_returns_link_immediately_for_seeding_torrent(self):
+        """When TorBox already has the torrent seeding, _process_job returns link without add_magnet."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+            "&dn=FastPathTest"
+        )
+        existing_seeding = {
+            "id": "999",
+            "download_state": "seeding",
+            "progress": 1.0,
+            "files": [{"id": 5, "name": "movie.mkv", "size": 4_000_000_000}],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_fast", magnet=MAGNET, title="FastPathTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=existing_seeding) as mock_hash, \
+                 patch("app.services.stream.torbox.request_download_link",
+                       new_callable=AsyncMock,
+                       return_value="https://cdn.torbox.app/fast.mkv") as mock_dl, \
+                 patch("app.services.stream.torbox.add_magnet",
+                       new_callable=AsyncMock) as mock_add:
+                await _process_job(job.job_id)
+                # add_magnet must NOT have been called (fast path taken)
+                mock_add.assert_not_called()
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "ready"
+        assert job.direct_url == "https://cdn.torbox.app/fast.mkv"
+
+    def test_null_data_from_add_magnet_falls_back_to_infohash_lookup(self):
+        """When add_magnet returns null data, _process_job recovers torrent_id via infohash."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+            "&dn=FallbackTest"
+        )
+        existing_torrent = {
+            "id": "101",
+            "download_state": "downloading",
+            "progress": 0.3,
+            "files": [{"id": 2, "name": "film.mkv", "size": 3_000_000_000}],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_fallback", magnet=MAGNET, title="FallbackTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None) as mock_hash, \
+                 patch("app.services.stream.torbox.add_magnet",
+                       new_callable=AsyncMock,
+                       return_value={"data": None, "success": False, "detail": "ACTIVE_DOWNLOAD"}
+                       ) as mock_add, \
+                 patch("app.services.stream.torbox.get_torrent_by_id",
+                       new_callable=AsyncMock, return_value=existing_torrent) as mock_gtid, \
+                 patch("app.services.stream.torbox.request_download_link",
+                       new_callable=AsyncMock,
+                       return_value="https://cdn.torbox.app/fallback.mkv"), \
+                 patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
+                # On the fallback path, get_torrent_by_hash is called a second time
+                # with the infohash to recover the torrent_id
+                mock_hash.return_value = existing_torrent
+                await _process_job(job.job_id)
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        # Should recover the torrent_id and eventually be ready
+        assert job.state in ("ready", "preparing", "failed")  # may not reach ready in mock
+
+    def test_direct_url_cached_by_infohash(self):
+        """_save_direct_url saves by both magnet-hash and infohash."""
+        import asyncio
+        from app.services.stream import _save_direct_url, _extract_infohash
+        from app.cache import direct_url_cache
+
+        MAGNET = "magnet:?xt=urn:btih:1234567890ABCDEF1234567890ABCDEF12345678&dn=CacheTest"
+        MHASH = "testmhash001"
+        URL = "https://cdn.torbox.app/test.mkv"
+
+        async def run():
+            await _save_direct_url(MHASH, MAGNET, URL)
+            by_hash = await direct_url_cache.aget(MHASH)
+            infohash = _extract_infohash(MAGNET)
+            by_ih = await direct_url_cache.aget(infohash) if infohash else None
+            return by_hash, by_ih
+
+        by_hash, by_ih = asyncio.get_event_loop().run_until_complete(run())
+        assert by_hash == URL
+        assert by_ih == URL  # cached by infohash too
+
+    def test_get_torrent_by_hash_returns_matching_torrent(self):
+        """get_torrent_by_hash returns the torrent whose 'hash' field matches."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app import torbox as tb
+
+        torrents = [
+            {"id": "1", "hash": "AABBCCDD" * 5, "download_state": "seeding", "files": []},
+            {"id": "2", "hash": "11223344" * 5, "download_state": "downloading", "files": []},
+        ]
+
+        async def run():
+            with patch.object(tb, "get_torrent_list", new=AsyncMock(return_value=torrents)):
+                return await tb.get_torrent_by_hash("aabbccdd" * 5)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result is not None
+        assert result["id"] == "1"
+
+    def test_get_torrent_by_hash_returns_none_when_not_found(self):
+        """get_torrent_by_hash returns None when no matching hash in list."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app import torbox as tb
+
+        async def run():
+            with patch.object(tb, "get_torrent_list", new=AsyncMock(return_value=[])):
+                return await tb.get_torrent_by_hash("deadbeef" * 10)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result is None

@@ -71,6 +71,15 @@ async def _load_job(job_id: str) -> Optional[StreamJob]:
         return None
 
 
+async def _save_direct_url(magnet_hash: str, magnet: str, url: str) -> None:
+    """Persist direct_url to cache keyed by both magnet-hash and infohash."""
+    await direct_url_cache.aset(magnet_hash, url)
+    infohash = _extract_infohash(magnet)
+    if infohash:
+        await direct_url_cache.aset(infohash, url)
+        logger.debug("[Easy-Mod][Stream] direct_url cached by infohash=%s", infohash)
+
+
 async def _update_job(job_id: str, **kwargs) -> Optional[StreamJob]:
     """Load, patch, save, return updated job (or None if missing)."""
     job = await _load_job(job_id)
@@ -183,8 +192,59 @@ async def _process_job(job_id: str) -> None:
         return
 
     try:
-        # ── Add magnet or torrent file URL to TorBox ──────────────────────
+        # ── Fast path: check if TorBox already has this torrent ───────────
+        # This handles: (a) re-opened film after server restart,
+        # (b) user opens same film twice while first job still running.
         is_torrent_url = job.magnet.startswith("http://") or job.magnet.startswith("https://")
+        existing_torrent_id: Optional[str] = None
+        if not is_torrent_url:
+            infohash = _extract_infohash(job.magnet)
+            if infohash:
+                try:
+                    existing = await torbox.get_torrent_by_hash(infohash)
+                    if existing:
+                        existing_torrent_id = str(existing.get("id"))
+                        ex_state = existing.get("download_state", "")
+                        ex_files = existing.get("files") or []
+                        logger.info(
+                            "[Easy-Mod][TorBox] found existing torrent torrent_id=%s "
+                            "state=%s files=%d job_id=%s",
+                            existing_torrent_id, ex_state, len(ex_files), job_id,
+                        )
+                        # If already seeding/completed and files are listed, get link now
+                        _READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
+                        if ex_state in _READY_STATES and ex_files:
+                            file_id = ex_files[0].get("id")
+                            if file_id is not None:
+                                try:
+                                    direct_url = await torbox.request_download_link(
+                                        existing_torrent_id, file_id
+                                    )
+                                except Exception as exc:
+                                    logger.warning(
+                                        "[Easy-Mod][TorBox] fast-path requestdl error: %s", exc
+                                    )
+                                    direct_url = None
+                                if direct_url:
+                                    mhash = job.magnet_hash or _magnet_hash(job.magnet)
+                                    await _save_direct_url(mhash, job.magnet, direct_url)
+                                    await _update_job(
+                                        job_id,
+                                        torrent_id=existing_torrent_id,
+                                        state="ready",
+                                        progress=1.0,
+                                        direct_url=direct_url,
+                                        message="",
+                                    )
+                                    logger.info(
+                                        "[Easy-Mod][TorBox] fast-path ready job_id=%s url=%.80s",
+                                        job_id, direct_url,
+                                    )
+                                    return
+                except Exception as exc:
+                    logger.warning("[Easy-Mod][TorBox] fast-path lookup error: %s", exc)
+
+        # ── Add magnet or torrent file URL to TorBox ──────────────────────
         logger.info(
             "[Easy-Mod][TorBox] %s job_id=%s value=%.60s",
             "add_torrent_url" if is_torrent_url else "add_magnet",
@@ -215,6 +275,27 @@ async def _process_job(job_id: str) -> None:
 
         data = result.get("data") or {}
         torrent_id = data.get("torrent_id") or data.get("id")
+
+        if not torrent_id:
+            # TorBox may return null data when the torrent already exists in the queue.
+            # Try to find it by infohash before giving up.
+            if not is_torrent_url:
+                infohash = _extract_infohash(job.magnet)
+                if infohash:
+                    try:
+                        found = await torbox.get_torrent_by_hash(infohash)
+                        if found:
+                            torrent_id = str(found.get("id"))
+                            logger.info(
+                                "[Easy-Mod][TorBox] recovered torrent_id=%s via infohash "
+                                "after null-data response job_id=%s",
+                                torrent_id, job_id,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "[Easy-Mod][TorBox] infohash fallback error job_id=%s: %s",
+                            job_id, exc,
+                        )
 
         if not torrent_id:
             detail = result.get("detail") or result.get("error") or ""
@@ -311,31 +392,32 @@ async def _process_job(job_id: str) -> None:
             # TorBox direct links support Range requests — player can stream
             # even while the torrent is still downloading (progressive play).
             if files:
-                file_id = files[0].get("id", 0)
-                try:
-                    direct_url = await torbox.request_download_link(torrent_id, file_id)
-                except Exception as exc:
-                    logger.error(
-                        "[Easy-Mod][TorBox] request_download_link failed job_id=%s: %s",
-                        job_id, exc,
-                    )
-                    direct_url = None
+                file_id = files[0].get("id")
+                if file_id is not None:
+                    try:
+                        direct_url = await torbox.request_download_link(torrent_id, file_id)
+                    except Exception as exc:
+                        logger.error(
+                            "[Easy-Mod][TorBox] request_download_link failed job_id=%s: %s",
+                            job_id, exc,
+                        )
+                        direct_url = None
 
-                if direct_url:
-                    mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                    await direct_url_cache.aset(mhash, direct_url)
-                    await _update_job(
-                        job_id,
-                        state="ready",
-                        progress=1.0,
-                        direct_url=direct_url,
-                        message="",
-                    )
-                    logger.info(
-                        "[Easy-Mod][TorBox] ready job_id=%s url=%.80s",
-                        job_id, direct_url,
-                    )
-                    return
+                    if direct_url:
+                        mhash = job.magnet_hash or _magnet_hash(job.magnet)
+                        await _save_direct_url(mhash, job.magnet, direct_url)
+                        await _update_job(
+                            job_id,
+                            state="ready",
+                            progress=1.0,
+                            direct_url=direct_url,
+                            message="",
+                        )
+                        logger.info(
+                            "[Easy-Mod][TorBox] ready job_id=%s url=%.80s",
+                            job_id, direct_url,
+                        )
+                        return
 
             # ── Stall detection: no progress and no usable files for too long
             if stall_ticks >= _STALL_TICK_LIMIT:

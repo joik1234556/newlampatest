@@ -160,6 +160,19 @@ async def get_torrent_by_id(torrent_id: int | str) -> dict | None:
     return None
 
 
+async def get_torrent_by_hash(infohash: str) -> dict | None:
+    """Return a single torrent record from mylist by info-hash (hex, lowercase)."""
+    ih = infohash.lower()
+    try:
+        torrents = await get_torrent_list()
+        for t in torrents:
+            if (t.get("hash") or "").lower() == ih:
+                return t
+    except Exception as exc:
+        logger.error("TorBox get_torrent_by_hash error: %s", exc)
+    return None
+
+
 def _guess_quality(name: str) -> str:
     """Guess video quality from a filename or label string."""
     name_lower = name.lower()

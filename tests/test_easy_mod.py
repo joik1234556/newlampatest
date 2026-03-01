@@ -1453,3 +1453,121 @@ class TestVariantsImdbIdParam:
 
         assert resp.status_code == 200
         assert captured_kwargs.get("imdb_id") == "tt1375666"
+
+
+# ---------------------------------------------------------------------------
+# JackettProvider — TV series tvsearch with IMDB ID
+# ---------------------------------------------------------------------------
+
+class TestJackettTvSearch:
+    """Verify JackettProvider uses t=tvsearch&imdbid= for TV series with IMDB ID."""
+
+    def _make_mock_client(self, mock_response):
+        from unittest.mock import AsyncMock, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = mock_response
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client
+
+    def test_tv_series_uses_tvsearch_with_imdb_id(self):
+        """With imdb_id + season, JackettProvider must use t=tvsearch&imdbid=&season=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+        mock_response = {
+            "Results": [
+                {
+                    "Title": "Breaking Bad S02 1080p",
+                    "MagnetUri": "magnet:?xt=urn:btih:aabbccdd001122334455667788990011aabb0022",
+                    "Seeders": 300,
+                    "Size": 15_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client(mock_response)
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mc.get.return_value
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants(
+                    "Breaking Bad", year=2009, imdb_id="tt0903747", season=2
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        tv_calls = [c for c in calls if c.get("t") == "tvsearch"]
+        assert tv_calls, f"Expected t=tvsearch call, got: {calls}"
+        assert tv_calls[0].get("imdbid") == "tt0903747"
+        assert tv_calls[0].get("season") == "2"
+        assert len(variants) == 1
+
+    def test_movie_uses_tmdb_id_when_no_imdb(self):
+        """Without imdb_id but with tmdb_id, JackettProvider must try t=movie&tmdbid=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+        mock_response = {"Results": []}
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client(mock_response)
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mc.get.return_value
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants("Inception", year=2010, tmdb_id="27205")
+
+        asyncio.get_event_loop().run_until_complete(run())
+        tmdb_calls = [c for c in calls if c.get("tmdbid") == "27205"]
+        assert tmdb_calls, f"Expected tmdbid=27205 call, got: {calls}"
+        assert tmdb_calls[0]["t"] == "movie"
+
+    def test_tv_series_without_imdb_uses_text_search(self):
+        """Series without imdb_id should fall back to text-based t=search."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+        mock_response = {"Results": []}
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client(mock_response)
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mc.get.return_value
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants("Breaking Bad", year=2009, season=2)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        text_calls = [c for c in calls if c.get("t") == "search"]
+        assert text_calls, f"Expected t=search fallback, got: {calls}"
+        # No ID-based params in text calls
+        assert all("imdbid" not in c and "tmdbid" not in c for c in text_calls)

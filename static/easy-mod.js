@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.6';
+    var VERSION = '5.7';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -500,7 +500,30 @@
             ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
               (self._filterSeason ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._filterSeason : '') + '\u2026'
             : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
-        self._render.html(loadingHtml(loadingLabel));
+
+        // For TV series: show season picker IMMEDIATELY before variants load.
+        // This way the user sees and can select the season right away without
+        // waiting for the backend to return results.
+        if (self._isSeries && self._seriesSeasons.length > 0) {
+            var earlyBar = buildFilters(
+                [], '', '', self._filterSeason, self._seriesSeasons,
+                function (type, val) {
+                    if (type === 'season') {
+                        self._filterSeason  = val;
+                        self._allVariants   = [];
+                        self._filterVoice   = '';
+                        self._filterQuality = '';
+                        self._fetchVariants();
+                    }
+                }
+            );
+            var earlyWrap = jq('<div>');
+            if (earlyBar) { earlyWrap.append(earlyBar); }
+            earlyWrap.append(jq(loadingHtml(loadingLabel)));
+            self._render.html(earlyWrap);
+        } else {
+            self._render.html(loadingHtml(loadingLabel));
+        }
 
         var params = {};
         if (title) { params.title = title; }

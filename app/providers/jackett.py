@@ -28,6 +28,20 @@ from app.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
+# Shared async client — reuses TCP/TLS connections across requests (faster)
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Return a module-level shared httpx client, creating it on first call."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=20,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _http_client
+
 _QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 # Season patterns: "S01", "S1E01", "сезон 1", "season 1"
@@ -250,6 +264,48 @@ class JackettProvider(BaseProvider):
         found = int(found_str)
         return found == season
 
+    async def _id_search(
+        self,
+        url: str,
+        params: dict,
+        seen_magnets: set,
+        variants: list,
+        season: Optional[int] = None,
+    ) -> None:
+        """Execute one ID-based Jackett call and append valid variants (no title matching)."""
+        try:
+            client = _get_http_client()
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            for r in data.get("Results") or []:
+                title_r = r.get("Title", "")
+                magnet = r.get("MagnetUri") or ""
+                if not magnet.startswith("magnet:?xt=urn:btih"):
+                    continue
+                # For season-scoped queries, still validate the season in the title
+                if season and not self._season_ok(title_r, season):
+                    continue
+                if magnet in seen_magnets:
+                    continue
+                seen_magnets.add(magnet)
+                seeders  = int(r.get("Seeders", 0) or 0)
+                size_mb  = int(r.get("Size", 0) or 0) // (1024 * 1024)
+                quality  = _guess_quality(title_r)
+                codec    = _guess_codec(title_r)
+                voice    = _guess_voice(title_r)
+                vid = hashlib.sha1(
+                    f"jackett:{title_r}:{quality}:{seeders}".encode()
+                ).hexdigest()[:12]
+                label = f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-")
+                variants.append(Variant(
+                    id=vid, label=label, language="ru", voice=voice,
+                    quality=quality, size_mb=size_mb, seeders=seeders,
+                    codec=codec, magnet=magnet,
+                ))
+        except Exception as exc:
+            logger.warning("[JackettProvider] ID search error: %s", exc)
+
     async def search_variants(
         self,
         title: str,
@@ -276,53 +332,50 @@ class JackettProvider(BaseProvider):
         seen_magnets: set[str] = set()
         variants: list[Variant] = []
 
-        # ── IMDB-ID search (t=movie, exact match — only for non-season queries) ──
-        # When an IMDB ID is available and no season-specific query is needed,
-        # use the Newznab movie search type which supports exact IMDB ID lookup.
-        # This greatly reduces wrong-film results compared to text-based search.
-        if imdb_id and not season:
-            imdb_norm = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
-            imdb_params: dict[str, str] = {
+        # ── ID-based search (exact Newznab lookup — greatly reduces wrong-film results) ──
+        # Priority order:
+        #   1. IMDB ID + season  → t=tvsearch&imdbid=&season=  (TV series season)
+        #   2. IMDB ID, no season → t=movie&imdbid=             (movie)
+        #   3. TMDB ID, no season → t=movie&tmdbid=             (movie, IMDB not available)
+        imdb_norm = (imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}") if imdb_id else None
+
+        if imdb_norm:
+            if season:
+                # TV-series exact search: tvsearch + imdbid + season
+                id_params: dict[str, str] = {
+                    "apikey": JACKETT_API_KEY,
+                    "t": "tvsearch",
+                    "imdbid": imdb_norm,
+                    "season": str(season),
+                    "cat": cat_str,
+                }
+                logger.info("[JackettProvider] tvsearch imdbid=%s season=%s", imdb_norm, season)
+            else:
+                # Movie exact search: movie + imdbid
+                id_params = {
+                    "apikey": JACKETT_API_KEY,
+                    "t": "movie",
+                    "imdbid": imdb_norm,
+                    "cat": cat_str,
+                }
+                logger.info("[JackettProvider] movie search imdbid=%s", imdb_norm)
+            await self._id_search(url, id_params, seen_magnets, variants, season=season)
+            logger.info("[JackettProvider] ID(imdb) search found %d results for %s", len(variants), imdb_norm)
+            if len(variants) >= MAX_VARIANTS:
+                return variants
+
+        elif tmdb_id and not season:
+            # Fallback: TMDB-based movie search (when IMDB ID is not available)
+            tmdb_params: dict[str, str] = {
                 "apikey": JACKETT_API_KEY,
                 "t": "movie",
-                "imdbid": imdb_norm,
+                "tmdbid": tmdb_id,
                 "cat": cat_str,
             }
-            logger.info("[JackettProvider] IMDB search imdbid=%s", imdb_norm)
-            try:
-                async with httpx.AsyncClient(timeout=20) as client:
-                    resp = await client.get(url, params=imdb_params)
-                    resp.raise_for_status()
-                    data = resp.json()
-                for r in data.get("Results") or []:
-                    title_r = r.get("Title", "")
-                    magnet = r.get("MagnetUri") or ""
-                    if not magnet.startswith("magnet:?xt=urn:btih"):
-                        continue
-                    if magnet in seen_magnets:
-                        continue
-                    seen_magnets.add(magnet)
-                    seeders  = int(r.get("Seeders", 0) or 0)
-                    size_mb  = int(r.get("Size", 0) or 0) // (1024 * 1024)
-                    quality  = _guess_quality(title_r)
-                    codec    = _guess_codec(title_r)
-                    voice    = _guess_voice(title_r)
-                    vid = hashlib.sha1(
-                        f"jackett:{title_r}:{quality}:{seeders}".encode()
-                    ).hexdigest()[:12]
-                    label = f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-")
-                    variants.append(Variant(
-                        id=vid, label=label, language="ru", voice=voice,
-                        quality=quality, size_mb=size_mb, seeders=seeders,
-                        codec=codec, magnet=magnet,
-                    ))
-                logger.info("[JackettProvider] IMDB search found %d results for %s", len(variants), imdb_norm)
-            except Exception as exc:
-                logger.warning("[JackettProvider] IMDB search error imdbid=%s: %s", imdb_norm, exc)
-
-            # If IMDB search returned results, skip the slower title-based queries
+            logger.info("[JackettProvider] movie search tmdbid=%s", tmdb_id)
+            await self._id_search(url, tmdb_params, seen_magnets, variants, season=None)
+            logger.info("[JackettProvider] ID(tmdb) search found %d results for tmdb:%s", len(variants), tmdb_id)
             if len(variants) >= MAX_VARIANTS:
-                logger.info("[JackettProvider] IMDB search sufficient (%d), skipping title queries", len(variants))
                 return variants
 
         # ── Fallback: title-based text search ────────────────────────────────
@@ -337,10 +390,10 @@ class JackettProvider(BaseProvider):
             logger.info("[JackettProvider] GET %s query=%s", url, query)
 
             try:
-                async with httpx.AsyncClient(timeout=20) as client:
-                    resp = await client.get(url, params=params)
-                    resp.raise_for_status()
-                    data = resp.json()
+                client = _get_http_client()
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
             except Exception as exc:
                 logger.warning("[JackettProvider] request error query=%s: %s", query, exc)
                 continue

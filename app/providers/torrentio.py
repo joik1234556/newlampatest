@@ -1,12 +1,11 @@
 """
 Torrentio provider — searches torrents via the public Torrentio API.
 
-Uses TMDB ID (preferred) or falls back to a title-based lookup via
-Cinemeta (Stremio metadata service) when only a title is available.
+Uses IMDB ID (preferred, most accurate) or TMDB ID to fetch torrent streams.
 
 API format:
-  https://torrentio.strem.fun/stream/movie/tmdb:{id}.json   (movie)
-  https://torrentio.strem.fun/stream/series/tmdb:{id}:1:1.json  (series ep 1x1)
+  https://torrentio.strem.fun/stream/movie/{id}.json    (movie)
+  https://torrentio.strem.fun/stream/series/{id}:1:1.json  (series ep 1x1)
 """
 from __future__ import annotations
 
@@ -29,6 +28,20 @@ _CINEMETA_BASE = "https://v3-cinemeta.strem.io"
 _QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)
 _SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(GB|MB)", re.IGNORECASE)
 _SEEDERS_RE = re.compile(r"👤\s*(\d+)")
+
+# Shared async client — reuses TCP/TLS connections across requests
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Return a module-level shared httpx client, creating it on first call."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=15,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+        )
+    return _http_client
 
 
 def _parse_quality(text: str) -> str:
@@ -101,10 +114,10 @@ class TorrentioProvider(BaseProvider):
         for url in candidate_urls:
             logger.info("[TorrentioProvider] GET %s", url)
             try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(url, follow_redirects=True)
-                    resp.raise_for_status()
-                    data = resp.json()
+                client = _get_http_client()
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                data = resp.json()
                 candidates = data.get("streams") or []
                 if candidates:
                     streams = candidates

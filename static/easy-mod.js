@@ -344,13 +344,15 @@
     // -------------------------------------------------------
     // Filter bar: quality + voice pills (modss-style)
     // -------------------------------------------------------
-    function buildFilters(variants, activeVoice, activeQuality, activeSeason, seasons, activeEpisode, episodeCounts, onChange) {
-        var voices = [], qualities = [], voiceSeen = {}, qualSeen = {};
+    function buildFilters(variants, activeVoice, activeQuality, activeSeason, seasons, activeEpisode, episodeCounts, activeLang, onChange) {
+        var voices = [], qualities = [], langs = [], voiceSeen = {}, qualSeen = {}, langSeen = {};
         for (var i = 0; i < variants.length; i++) {
             var vc = variants[i].voice || '';
             var qc = (variants[i].quality || '').toLowerCase();
+            var lc = (variants[i].language || '').toLowerCase();
             if (vc && !voiceSeen[vc]) { voiceSeen[vc] = true; voices.push(vc); }
             if (qc && !qualSeen[qc]) { qualSeen[qc] = true; qualities.push(qc); }
+            if (lc && !langSeen[lc]) { langSeen[lc] = true; langs.push(lc); }
         }
         var hasSeason  = seasons && seasons.length > 0;
         // Build episode list for the active season
@@ -364,7 +366,8 @@
         // (consistent with modss which always shows its filter bar)
         var hasQual  = qualities.length >= 1;
         var hasVoice = voices.length >= 1;
-        if (!hasSeason && !hasQual && !hasVoice) { return null; }
+        var hasLang  = langs.length >= 2;  // show language filter only when >= 2 distinct languages
+        if (!hasSeason && !hasQual && !hasVoice && !hasLang) { return null; }
 
         var wrap = jq('<div class="em-filters">');
 
@@ -425,6 +428,25 @@
             wrap.append(qg);
         }
 
+        // Language group (shown when there are 2+ distinct languages)
+        if (hasLang) {
+            var lg = jq('<div class="em-filter-group">');
+            lg.append(jq('<span class="em-filter-label">').text('\u042f\u0437\u044b\u043a:'));
+            var lAll = jq('<div class="em-filter-btn selector">').text('\u0412\u0441\u0435');
+            if (!activeLang) { lAll.addClass('active'); }
+            lAll.on('hover:enter click', function () { onChange('lang', ''); });
+            lg.append(lAll);
+            for (var li = 0; li < langs.length; li++) {
+                (function (lc) {
+                    var btn = jq('<div class="em-filter-btn selector">').text(langLabel(lc));
+                    if (activeLang === lc) { btn.addClass('active'); }
+                    btn.on('hover:enter click', function () { onChange('lang', lc); });
+                    lg.append(btn);
+                })(langs[li]);
+            }
+            wrap.append(lg);
+        }
+
         // Voice group
         if (hasVoice) {
             var vg = jq('<div class="em-filter-group">');
@@ -470,6 +492,7 @@
         this._allVariants   = [];
         this._filterVoice   = '';
         this._filterQuality = '';
+        this._filterLang    = '';
         this._filterSeason  = 0;   // 0 = no season filter (all seasons)
         this._filterEpisode = 0;   // 0 = no episode filter
         this._isSeries      = false;
@@ -563,7 +586,7 @@
         if (self._isSeries && self._seriesSeasons.length > 0) {
             var earlyBar = buildFilters(
                 [], '', '', self._filterSeason, self._seriesSeasons,
-                self._filterEpisode, self._episodeCounts,
+                self._filterEpisode, self._episodeCounts, '',
                 function (type, val) {
                     if (type === 'season') {
                         self._filterSeason  = val;
@@ -571,12 +594,14 @@
                         self._allVariants   = [];
                         self._filterVoice   = '';
                         self._filterQuality = '';
+                        self._filterLang    = '';
                         self._fetchVariants();
                     } else if (type === 'episode') {
                         self._filterEpisode = val;
                         self._allVariants   = [];
                         self._filterVoice   = '';
                         self._filterQuality = '';
+                        self._filterLang    = '';
                         self._fetchVariants();
                     }
                 }
@@ -603,6 +628,7 @@
                 self._allVariants  = variants;
                 self._filterVoice  = '';
                 self._filterQuality = '';
+                self._filterLang    = '';
                 self._renderVariants();
             } catch (e) {
                 log('variants render error', e.message);
@@ -626,27 +652,30 @@
         var variants = self._allVariants || [];
         var fv       = self._filterVoice   || '';
         var fq       = self._filterQuality || '';
+        var fl       = self._filterLang    || '';
 
         // Destroy previous scroll
         try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) {}
         self._scroll = null;
 
-        // Apply quality/voice client-side filters
+        // Apply quality/voice/language client-side filters
         var shown = [];
         for (var k = 0; k < variants.length; k++) {
             var v = variants[k];
             if (fv && (v.voice || '') !== fv) { continue; }
             if (fq && (v.quality || '').toLowerCase() !== fq) { continue; }
+            if (fl && (v.language || '').toLowerCase() !== fl) { continue; }
             shown.push(v);
         }
 
-        // Rebuild filter bar (season + episode + quality + voice) in the PERSISTENT container.
+        // Rebuild filter bar (season + episode + quality + language + voice) in the PERSISTENT container.
         // This means the season/episode rows never disappear — only active buttons change.
         self._filterContainer.empty();
         var filterBar = buildFilters(
             variants, fv, fq,
             self._filterSeason, self._seriesSeasons || [],
             self._filterEpisode, self._episodeCounts || {},
+            fl,
             function (type, val) {
                 if (type === 'quality') {
                     self._filterQuality = val;
@@ -654,18 +683,23 @@
                 } else if (type === 'voice') {
                     self._filterVoice = val;
                     self._renderVariants();
+                } else if (type === 'lang') {
+                    self._filterLang = val;
+                    self._renderVariants();
                 } else if (type === 'season') {
                     self._filterSeason  = val;
                     self._filterEpisode = 0;
                     self._allVariants   = [];
                     self._filterVoice   = '';
                     self._filterQuality = '';
+                    self._filterLang    = '';
                     self._fetchVariants();
                 } else if (type === 'episode') {
                     self._filterEpisode = val;
                     self._allVariants   = [];
                     self._filterVoice   = '';
                     self._filterQuality = '';
+                    self._filterLang    = '';
                     self._fetchVariants();
                 }
             }

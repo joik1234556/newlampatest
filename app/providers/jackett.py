@@ -116,6 +116,26 @@ _UA_LANG_RE = re.compile(
     r"\bua\b|\bukr\b|\bukrain|\bукр\b|\bукраїн|\[ua\]|\[ukr\]",
     re.IGNORECASE,
 )
+_MULTI_LANG_RE = re.compile(r"\bmulti\b|\bmulti[- ]?audio\b|\bмульти\b", re.IGNORECASE)
+_EN_LANG_RE = re.compile(r"\beng\b|\benglish\b|\[en\]", re.IGNORECASE)
+# Broad Russian indicators: [Rus], (rus), standalone "рус", "russian" in tag
+_RU_BROAD_RE = re.compile(
+    r"\brus\b|\brussian\b|\bрус(?:ская)?\b|\[rus\]|\(rus\)",
+    re.IGNORECASE,
+)
+
+
+def _detect_language(title: str) -> str:
+    """Return language code (ru/ua/en/multi) based on torrent title markers."""
+    if _MULTI_LANG_RE.search(title):
+        return "multi"
+    if _UA_LANG_RE.search(title):
+        return "ua"
+    if _RU_BROAD_RE.search(title) or _RU_LANG_RE.search(title):
+        return "ru"
+    if _EN_LANG_RE.search(title):
+        return "en"
+    return "ru"  # default: most CIS-region trackers use Russian when no language tag is present
 
 
 def _guess_voice(title: str) -> str:
@@ -339,7 +359,7 @@ class JackettProvider(BaseProvider):
                 ).hexdigest()[:12]
                 label = f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-")
                 variants.append(Variant(
-                    id=vid, label=label, language="ru", voice=voice,
+                    id=vid, label=label, language=_detect_language(title_r), voice=voice,
                     quality=quality, size_mb=size_mb, seeders=seeders,
                     codec=codec, magnet=magnet,
                 ))
@@ -517,7 +537,7 @@ class JackettProvider(BaseProvider):
                     Variant(
                         id=vid,
                         label=label,
-                        language="ru",
+                        language=_detect_language(title_r),
                         voice=voice,
                         quality=quality,
                         size_mb=size_mb,

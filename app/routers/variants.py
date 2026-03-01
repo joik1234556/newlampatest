@@ -26,6 +26,7 @@ async def variants(
     imdb_id: Optional[str] = Query(None, description="IMDB ID (e.g. tt0111161) for exact matching"),
     original_title: Optional[str] = Query(None, description="Original (English) title for better Jackett search"),
     quality: Optional[str] = Query(None, description="Filter by quality tier: 4k|2160p|1080p|720p|480p"),
+    language: Optional[str] = Query(None, description="Filter by audio language: ru|ua|en|multi"),
     season: Optional[int] = Query(None, description="TV series season number (1-based)"),
     episode: Optional[int] = Query(None, description="TV series episode number (1-based)"),
 ) -> VariantsResponse:
@@ -53,5 +54,9 @@ async def variants(
         if q_norm in ("4k", "uhd"):
             q_norm = "2160p"
         result.variants = [v for v in result.variants if v.quality.lower() == q_norm]
+
+    if language and language.strip().lower() not in ("all", ""):
+        lang_norm = language.strip().lower()
+        result.variants = [v for v in result.variants if v.language == lang_norm]
 
     return result

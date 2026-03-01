@@ -209,6 +209,43 @@ async def get_torrent_by_hash(infohash: str) -> dict | None:
     return None
 
 
+async def search_torbox(
+    query: str,
+    cached_only: bool = True,
+    limit: int = 20,
+) -> list[dict]:
+    """
+    Search TorBox's native torrent index via ``/torrents/search``.
+
+    Returns a list of torrent dicts (keys: ``hash``, ``name``, ``size``,
+    ``seeders``, ``peers``, ``files``, …).  Gracefully falls back to ``[]``
+    on any error so callers can always continue normally.
+
+    ``cached_only=True`` restricts results to torrents that TorBox already
+    has cached and can start streaming immediately.
+    """
+    if not TORBOX_API_KEY:
+        return []
+    params: dict[str, str] = {
+        "query": query,
+        "cached_only": "true" if cached_only else "false",
+        "limit": str(limit),
+    }
+    try:
+        result = await _get("/torrents/search", params=params)
+        data = result.get("data") or []
+        if isinstance(data, list):
+            logger.info(
+                "TorBox search '%s': %d result(s) (cached_only=%s)",
+                query, len(data), cached_only,
+            )
+            return data
+        return []
+    except Exception as exc:
+        logger.warning("TorBox search_torbox error for '%s': %s", query, exc)
+        return []
+
+
 def guess_quality(name: str) -> str:
     """Guess video quality from a filename or label string."""
     name_lower = name.lower()

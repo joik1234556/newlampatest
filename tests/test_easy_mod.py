@@ -998,7 +998,7 @@ class TestTorboxGetTorrentUrl:
 
 class TestVariantsTop3:
     def test_variants_at_most_max(self, client):
-        """After sorting by seeders, at most 4 variants are returned (_MAX_RESULTS cap)."""
+        """After sorting by seeders, at most _MAX_RESULTS (10) variants are returned."""
         from unittest.mock import AsyncMock, patch
         from app.models import Variant
         from app.providers.torrentio import TorrentioProvider
@@ -1019,8 +1019,8 @@ class TestVariantsTop3:
             resp = client.get("/variants?title=Top3TestFilmXYZ123&year=2025")
         assert resp.status_code == 200
         variants = resp.json()["variants"]
-        # Capped at 4 (_MAX_RESULTS), sorted by seeders desc
-        assert len(variants) == 4
+        # All 5 fit within _MAX_RESULTS (10), sorted by seeders desc
+        assert len(variants) == 5
         # First result must be the one with most seeders (v3: 200)
         assert variants[0]["id"] == "v3"
         assert variants[0]["seeders"] == 200
@@ -1573,3 +1573,188 @@ class TestJackettTvSearch:
         assert text_calls, f"Expected t=search fallback, got: {calls}"
         # No ID-based params in text calls
         assert all("imdbid" not in c and "tmdbid" not in c for c in text_calls)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid TorBox search + Ukrainian dubbing
+# ---------------------------------------------------------------------------
+
+class TestHybridTorBoxSearch:
+    """Tests for TorBox native search integration and Ukrainian dubbing."""
+
+    def _make_mock_client(self, response_data):
+        """Create a minimal mock httpx client that returns response_data."""
+        from unittest.mock import AsyncMock, MagicMock
+        mc = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = response_data
+        mock_resp.raise_for_status = MagicMock()
+        mc.get = AsyncMock(return_value=mock_resp)
+        return mc
+
+    def test_torbox_search_torbox_returns_variants(self):
+        """search_torbox() should convert TorBox results to Variant objects."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        fake_results = [
+            {
+                "hash": "aabbccddeeaabbccddeeaabbccddeeaabbccddee",
+                "name": "Dune Part Two 2024 1080p BluRay",
+                "size": 10 * 1024 * 1024 * 1024,
+                "seeders": 500,
+            },
+            {
+                "hash": "1122334455112233445511223344551122334455",
+                "name": "Dune Part Two 2024 2160p UHD",
+                "size": 50 * 1024 * 1024 * 1024,
+                "seeders": 200,
+            },
+        ]
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=fake_results)):
+                return await _torbox_search_variants("Dune Part Two", 2024)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 2
+        assert all(v.is_cached for v in variants)
+        assert any(v.quality == "1080p" for v in variants)
+        assert any(v.quality == "2160p" for v in variants)
+
+    def test_torbox_search_torbox_handles_empty_results(self):
+        """search_torbox() should return [] when TorBox returns no results."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=[])):
+                return await _torbox_search_variants("Some Obscure Title", 2001)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_torbox_search_torbox_handles_error_gracefully(self):
+        """search_torbox() error must NOT crash variants; returns [] instead."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(side_effect=Exception("timeout"))):
+                return await _torbox_search_variants("Any Movie", 2023)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_torbox_search_merged_with_provider_results(self, client):
+        """TorBox search results should be merged with Jackett/Torrentio results."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        torbox_variant = Variant(
+            id="tb001",
+            label="TorBox Cached 1080p",
+            quality="1080p",
+            language="en",
+            seeders=1000,
+            is_cached=True,
+            magnet="magnet:?xt=urn:btih:AABBCCDDEEAABBCCDDEEAABBCCDDEEAABBCCDDEE",
+        )
+        provider_variant = Variant(
+            id="pv001",
+            label="Jackett 1080p",
+            quality="1080p",
+            language="ru",
+            seeders=50,
+            magnet="magnet:?xt=urn:btih:1122334455112233445511223344551122334455",
+        )
+
+        from app.providers.torrentio import TorrentioProvider
+        from app.services.variants import _torbox_search_variants
+
+        with patch.object(
+            TorrentioProvider, "search_variants",
+            new=AsyncMock(return_value=[provider_variant])
+        ), patch(
+            "app.services.variants._torbox_search_variants",
+            new=AsyncMock(return_value=[torbox_variant])
+        ):
+            resp = client.get("/variants?title=HybridMergeTestXYZ&year=2024")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        ids = [v["id"] for v in body["variants"]]
+        assert "tb001" in ids, "TorBox variant must appear in merged results"
+        assert "pv001" in ids, "Provider variant must appear in merged results"
+
+    def test_ukrainian_dubbing_search_runs_after_imdb_id_search(self):
+        """_search_ukrainian() must be called even when imdb_id is provided."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        id_results = [
+            {
+                "Title": "Dune 2021 1080p BluRay Rus",
+                "MagnetUri": "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "Seeders": 100, "Size": 0,
+            }
+        ]
+        ua_results = [
+            {
+                "Title": "Dune 2021 1080p UKR",
+                "MagnetUri": "magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "Seeders": 20, "Size": 0,
+            }
+        ]
+
+        call_count = {"id": 0, "ukr": 0}
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client({})
+
+                async def capturing_get(url, params=None, **kw):
+                    from unittest.mock import MagicMock
+                    mock_resp = MagicMock()
+                    mock_resp.raise_for_status = MagicMock()
+                    t = (params or {}).get("t", "")
+                    q = (params or {}).get("q", "").lower()
+                    if t in ("movie", "tvsearch"):
+                        call_count["id"] += 1
+                        mock_resp.json.return_value = {"Results": id_results}
+                    elif "ukr" in q or "укр" in q:
+                        call_count["ukr"] += 1
+                        mock_resp.json.return_value = {"Results": ua_results}
+                    else:
+                        mock_resp.json.return_value = {"Results": []}
+                    return mock_resp
+
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants(
+                    "Dune", year=2021, imdb_id="tt1160419",
+                    original_title="Dune",
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert call_count["id"] >= 1, "IMDB ID search must have run"
+        assert call_count["ukr"] >= 1, "Ukrainian UKR search must run even with imdb_id"
+        ua_variants = [v for v in variants if v.language == "ua"]
+        assert ua_variants, f"Expected ≥1 UA variant, got: {variants}"
+
+    def test_ua_lang_re_matches_ukr_tagged_title(self):
+        """_UA_LANG_RE must detect [UKR], [UA], UKR, укр markers in title."""
+        from app.providers.jackett import _UA_LANG_RE
+        assert _UA_LANG_RE.search("Movie 2024 1080p UKR")
+        assert _UA_LANG_RE.search("Movie 2024 [UA] BDRip")
+        assert _UA_LANG_RE.search("Movie 2024 [UKR] x265")
+        assert _UA_LANG_RE.search("Фільм 2024 укр дубляж")
+        assert not _UA_LANG_RE.search("Movie 2024 RUS 1080p")

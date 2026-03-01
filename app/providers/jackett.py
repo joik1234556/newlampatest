@@ -181,6 +181,16 @@ def _guess_codec(name: str) -> str:
     return "H264"
 
 
+# ---------------------------------------------------------------------------
+# Public aliases — the _guess_* / _detect_* helpers above are module-private
+# by convention but are also useful to other modules (e.g. variants service).
+# ---------------------------------------------------------------------------
+detect_language = _detect_language
+guess_voice     = _guess_voice
+guess_quality   = _guess_quality
+guess_codec     = _guess_codec
+
+
 def _normalize(text: str) -> str:
     """Lowercase, strip accents/punctuation, collapse whitespace."""
     text = unicodedata.normalize("NFKD", text)
@@ -366,6 +376,89 @@ class JackettProvider(BaseProvider):
         except Exception as exc:
             logger.warning("[JackettProvider] ID search error: %s", exc)
 
+    async def _search_ukrainian(
+        self,
+        url: str,
+        title: str,
+        original_title: Optional[str],
+        year: Optional[int],
+        season: Optional[int],
+        seen_magnets: set,
+        variants: list,
+    ) -> None:
+        """
+        Run Ukrainian-dubbed text queries against Jackett and append matching
+        variants to ``variants``.  This is called even when ID-based search was
+        used so that Ukrainian-dubbed packs (tagged [UA] / UKR) are always
+        surfaced — they are rarely indexed by IMDB/TMDB-based searches because
+        CIS-region trackers use custom title strings.
+        """
+        base = original_title if (original_title and original_title.lower() != title.lower()) else title
+        cat_str = (
+            "2000,2010,2020,2030,2040,2045,2050,2060,5000,5030,5040,5045"
+            if season
+            else "2000,2010,2020,2030,2040,2045,2050,2060"
+        )
+        queries: list[str] = []
+        if season:
+            queries.append(f"{base} S{season:02d} UKR")
+            queries.append(f"{base} сезон {season} укр")
+        else:
+            if year:
+                queries.append(f"{base} {year} UKR")
+            queries.append(f"{base} UKR")
+            queries.append(f"{base} укр")
+
+        for query in queries:
+            params: dict[str, str] = {
+                "apikey": JACKETT_API_KEY,
+                "t": "search",
+                "q": query,
+                "cat": cat_str,
+            }
+            logger.info("[JackettProvider] UKR query=%s", query)
+            try:
+                client = _get_http_client()
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                logger.warning("[JackettProvider] UKR query error '%s': %s", query, exc)
+                continue
+
+            added = 0
+            for r in data.get("Results") or []:
+                title_r = r.get("Title", "")
+                # Accept only results that contain a Ukrainian language marker
+                if not _UA_LANG_RE.search(title_r):
+                    continue
+                magnet = r.get("MagnetUri") or ""
+                if not magnet.startswith("magnet:?xt=urn:btih"):
+                    continue
+                if season and not self._season_ok(title_r, season):
+                    continue
+                if magnet in seen_magnets:
+                    continue
+                seen_magnets.add(magnet)
+                seeders = int(r.get("Seeders", 0) or 0)
+                size_mb = int(r.get("Size", 0) or 0) // (1024 * 1024)
+                quality = _guess_quality(title_r)
+                codec   = _guess_codec(title_r)
+                voice   = _guess_voice(title_r) or "Укр"
+                vid = hashlib.sha1(
+                    f"jackett:{title_r}:{quality}:{seeders}".encode()
+                ).hexdigest()[:12]
+                label = f"{voice} • {quality.upper()}"
+                variants.append(Variant(
+                    id=vid, label=label, language="ua", voice=voice,
+                    quality=quality, size_mb=size_mb, seeders=seeders,
+                    codec=codec, magnet=magnet,
+                ))
+                added += 1
+            logger.info("[JackettProvider] UKR query=%s found %d new UA results", query, added)
+            if len(variants) >= MAX_VARIANTS:
+                break
+
     async def search_variants(
         self,
         title: str,
@@ -424,9 +517,10 @@ class JackettProvider(BaseProvider):
                 logger.info("[JackettProvider] movie search imdbid=%s", imdb_norm)
             await self._id_search(url, id_params, seen_magnets, variants, season=season)
             logger.info("[JackettProvider] ID(imdb) search found %d results for %s", len(variants), imdb_norm)
-            # When an exact IMDB ID was used, NEVER fall back to text search:
-            # text search would add unrelated films with similar names.
-            # If ID search returned nothing, return [] so other providers handle it.
+            # When an exact IMDB ID was used, NEVER fall back to generic text search.
+            # However, always run Ukrainian-specific queries so that UA-dubbed packs
+            # (tagged [UA] / UKR) are surfaced — they are rarely returned by ID searches.
+            await self._search_ukrainian(url, title, original_title, year, season, seen_magnets, variants)
             return variants
 
         elif tmdb_id and not season:
@@ -440,7 +534,9 @@ class JackettProvider(BaseProvider):
             logger.info("[JackettProvider] movie search tmdbid=%s", tmdb_id)
             await self._id_search(url, tmdb_params, seen_magnets, variants, season=None)
             logger.info("[JackettProvider] ID(tmdb) search found %d results for tmdb:%s", len(variants), tmdb_id)
-            # Same: exact TMDB ID — never fall back to text search.
+            # Same: exact TMDB ID — never fall back to generic text search.
+            # But always run Ukrainian-specific queries.
+            await self._search_ukrainian(url, title, original_title, year, season, seen_magnets, variants)
             return variants
 
         # ── Fallback: title-based text search (only when no ID was provided) ─

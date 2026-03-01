@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from typing import Optional
 
 from app.cache import variants_cache
 from app.config import ENABLE_DEMO_PROVIDER, VARIANTS_CACHE_TTL
+from app import torbox as torbox_client
 from app.models import Variant, VariantsResponse
 from app.providers.demo_provider import DemoProvider
 from app.providers.jackett import JackettProvider, MAX_VARIANTS
@@ -137,10 +139,38 @@ async def get_variants(
             seen.add(v.id)
             deduped.append(v)
 
-    # Sort: seeders desc (primary) → quality desc (secondary) → size_mb desc (tiebreak)
-    # This gives the user the 4 most-seeded variants first.
+    # ── Batch TorBox cache check ────────────────────────────────────────────
+    # Extract infohash from each magnet, then check all at once.
+    # Cached variants are sorted to the top and marked with is_cached=True.
+    _IH_RE = re.compile(r"xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})", re.IGNORECASE)
+    ih_map: dict[str, str] = {}   # infohash_lower → variant.id
+    for v in deduped:
+        m = _IH_RE.search(v.magnet or "")
+        if m:
+            ih_map[m.group(1).lower()] = v.id
+
+    cached_set: set[str] = set()
+    if ih_map:
+        try:
+            cache_result = await torbox_client.batch_check_cached(list(ih_map.keys()))
+            cached_set = {ih for ih, ok in cache_result.items() if ok}
+            logger.info(
+                "[Easy-Mod][Variants] TorBox cache check: %d/%d cached for title=%s",
+                len(cached_set), len(ih_map), title,
+            )
+        except Exception as exc:
+            logger.warning("[Easy-Mod][Variants] batch_check_cached failed: %s", exc)
+
+    # Mark cached variants; rebuild list mapping infohash back to variant id
+    cached_variant_ids: set[str] = {ih_map[ih] for ih in cached_set if ih in ih_map}
+    for v in deduped:
+        if v.id in cached_variant_ids:
+            v.is_cached = True
+
+    # Sort: cached first, then seeders desc, quality desc, size_mb desc
     def _sort_key(v: Variant):
         return (
+            1 if v.is_cached else 0,
             v.seeders if v.seeders > 0 else -1,
             _quality_rank(v.quality),
             v.size_mb,

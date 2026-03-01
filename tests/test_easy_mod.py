@@ -222,7 +222,9 @@ class TestStreamStart:
         async def run():
             with patch("app.services.stream.torbox.add_magnet", side_effect=retry_err), \
                  patch("app.services.stream.torbox.get_torrent_by_hash",
-                       new_callable=AsyncMock, return_value=None):
+                       new_callable=AsyncMock, return_value=None), \
+                 patch("app.services.stream.torbox.check_cached",
+                       new_callable=AsyncMock, return_value=False):
                 req = StreamStartRequest(variant_id="v_retry", magnet=MAGNET, title="RetryTest")
                 job = await create_job(req)
                 # Give background task time to run

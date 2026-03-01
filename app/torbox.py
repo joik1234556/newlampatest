@@ -148,6 +148,42 @@ async def check_cached(infohash: str) -> bool:
         return False
 
 
+async def batch_check_cached(infohashes: list[str]) -> dict[str, bool]:
+    """
+    Batch-check whether torrents are already cached in TorBox.
+
+    Sends a single POST request with a comma-separated list of infohashes.
+    Returns a dict {infohash_lower → bool}.
+
+    Falls back to all-False on any error so callers can continue normally.
+    """
+    if not infohashes:
+        return {}
+    if not TORBOX_API_KEY:
+        return {}
+    try:
+        hashes_csv = ",".join(h.lower() for h in infohashes if h)
+        async with _client() as client:
+            resp = await client.post(
+                f"{TORBOX_BASE_URL}/torrents/checkcached",
+                json={"torrent_hashes": hashes_csv},
+            )
+            if not resp.is_success:
+                logger.warning("TorBox batch_check_cached status=%d", resp.status_code)
+                return {}
+            result = resp.json()
+        data = result.get("data") or []
+        if isinstance(data, list):
+            return {item["hash"].lower(): bool(item.get("cached")) for item in data if "hash" in item}
+        if isinstance(data, dict):
+            # Some TorBox versions return {hash: bool} directly
+            return {k.lower(): bool(v) for k, v in data.items()}
+        return {}
+    except Exception as exc:
+        logger.warning("TorBox batch_check_cached error: %s", exc)
+        return {}
+
+
 async def get_torrent_by_id(torrent_id: int | str) -> dict | None:
     """Return a single torrent record from mylist by id."""
     try:
@@ -173,13 +209,17 @@ async def get_torrent_by_hash(infohash: str) -> dict | None:
     return None
 
 
-def _guess_quality(name: str) -> str:
+def guess_quality(name: str) -> str:
     """Guess video quality from a filename or label string."""
     name_lower = name.lower()
     for q in ("2160p", "4k", "1080p", "720p", "480p", "360p"):
         if q in name_lower:
             return q.upper() if q == "4k" else q
     return "unknown"
+
+
+# Keep legacy private alias for backwards compatibility
+_guess_quality = guess_quality
 
 
 async def build_direct_links(

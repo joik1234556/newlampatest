@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.9';
+    var VERSION = '6.0';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -59,6 +59,15 @@
         ".em-quality--1080{color:#4caf50}",
         // Seeders badge (bottom-right of poster)
         ".em-seeders{position:absolute;bottom:.5em;right:.5em;background:#168FDF;color:#fff;padding:.15em .45em;border-radius:.3em;font-size:.8em}",
+        // ⚡ Cached / instant badge (bottom-left of poster)
+        ".em-cached-badge{position:absolute;bottom:.5em;left:.5em;background:#ff9800;color:#fff;padding:.15em .5em;border-radius:.3em;font-size:.8em;font-weight:700}",
+        // File picker (episode selector in ready torrent)
+        ".em-file-list{max-height:60vh;overflow-y:auto}",
+        ".em-file-item{display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;padding:.7em 1em;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.08)}",
+        ".em-file-item.focus,.em-file-item:hover{background:rgba(255,255,255,.1)}",
+        ".em-file-name{-webkit-box-flex:1;flex:1;overflow:hidden;-o-text-overflow:ellipsis;text-overflow:ellipsis;white-space:nowrap;font-size:.95em}",
+        ".em-file-size{font-size:.8em;opacity:.6;margin-left:1em;white-space:nowrap}",
+        ".em-file-quality{margin-left:.7em;font-size:.8em;font-weight:700;color:#4caf50}",
         // Wait screen
         ".em-wait{display:-webkit-box;display:flex;-webkit-box-orient:vertical;flex-direction:column;-webkit-box-align:center;align-items:center;-webkit-box-pack:center;justify-content:center;min-height:15em;text-align:center;padding:3em 2em}",
         ".em-wait__pct{font-size:3em;font-weight:700;margin-bottom:.3em}",
@@ -293,6 +302,10 @@
         // Seeders badge (bottom-right)
         if (v.seeders) {
             imgWrap.append(jq('<div class="em-seeders">').text('\u2b06 ' + v.seeders));
+        }
+        // ⚡ Cached badge (instant play)
+        if (v.is_cached) {
+            imgWrap.append(jq('<div class="em-cached-badge">').text('\u26a1 \u041c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u043e'));
         }
         card.append(imgWrap);
 
@@ -848,7 +861,9 @@
                 if (state === 'ready' && resp.direct_url) {
                     self._dead = true;
                     clearTimeout(self._timer);
-                    playDirect(resp.direct_url, self._movie);
+                    // Check if this torrent has multiple video files (whole-season pack)
+                    // If so, show a file picker before playing
+                    self._maybeShowFilePicker(resp.direct_url, self._jobId);
                     return;
                 }
                 if (state === 'failed') {
@@ -868,6 +883,66 @@
             if (self._statusErrors >= 3) { self._statusErrors = 0; }
             self._scheduleNext();
         });
+    };
+
+    EasyModWait.prototype._maybeShowFilePicker = function (defaultUrl, jobId) {
+        var self = this;
+        var m = self._movie || {};
+        // Fetch file list from /stream/files
+        apiGet('/stream/files', { job_id: jobId }, function (data) {
+            if (self._dead && self._dead !== 'picker') { return; }
+            var files = (data && data.files) || [];
+            var videoFiles = files.filter(function (f) { return f.is_video; });
+            // If only one video file (or none), play the default URL directly
+            if (videoFiles.length <= 1) {
+                playDirect(defaultUrl, m);
+                return;
+            }
+            // Multiple video files — show picker
+            self._showFilePicker(videoFiles, jobId, defaultUrl, m);
+        }, function () {
+            // Error fetching files — fall back to default URL
+            playDirect(defaultUrl, m);
+        });
+    };
+
+    EasyModWait.prototype._showFilePicker = function (files, jobId, defaultUrl, m) {
+        var self = this;
+        self._render.empty();
+        var wrap = jq('<div class="em-wait" style="padding:1em 1.5em">');
+        wrap.append(jq('<div class="em-wait__msg" style="margin-bottom:.7em">').text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0435\u0440\u0438\u044e:'));
+        var listEl = jq('<div class="em-file-list">');
+        for (var fi = 0; fi < files.length; fi++) {
+            (function (f) {
+                var item = jq('<div class="em-file-item selector">');
+                var name = f.name || String(f.file_id);
+                // Shorten: show only basename
+                var basename = name.split(/[\\/]/).pop();
+                item.append(jq('<span class="em-file-name">').text(basename));
+                if (f.quality) {
+                    item.append(jq('<span class="em-file-quality">').text(f.quality.toUpperCase()));
+                }
+                if (f.size_mb > 0) {
+                    item.append(jq('<span class="em-file-size">').text(fmtSize(f.size_mb)));
+                }
+                item.on('hover:enter click', function () {
+                    // Request direct link for the chosen file
+                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(f.file_id) }, function (resp) {
+                        if (resp && resp.direct_url) {
+                            playDirect(resp.direct_url, m);
+                        } else {
+                            playDirect(defaultUrl, m);
+                        }
+                    }, function () {
+                        playDirect(defaultUrl, m);
+                    });
+                });
+                listEl.append(item);
+            })(files[fi]);
+        }
+        wrap.append(listEl);
+        self._render.append(wrap);
+        try { Lampa.Controller.toggle('content'); } catch (e) {}
     };
 
     EasyModWait.prototype._showError = function (msg) {

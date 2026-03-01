@@ -268,6 +268,8 @@ class JackettProvider(BaseProvider):
             if original_title and original_title.lower() != title.lower():
                 add(f"{original_title} S{s2}")
                 add(f"{original_title} Season {season}")
+            # Ukrainian suffix variants
+            add(f"{title if not original_title else original_title} S{s2} UKR")
         else:
             # Primary: title + year (most specific — avoids picking up unrelated films)
             if year:
@@ -278,6 +280,11 @@ class JackettProvider(BaseProvider):
             add(title)
             if original_title and original_title.lower() != title.lower():
                 add(original_title)
+            # Ukrainian language variants (catches [UA], UKR, Ukrainian dubs)
+            base_for_ua = original_title if (original_title and original_title.lower() != title.lower()) else title
+            if year:
+                add(f"{base_for_ua} {year} UKR")
+            add(f"{base_for_ua} UKR")
 
         return queries
 

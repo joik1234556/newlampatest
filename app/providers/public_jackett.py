@@ -20,7 +20,7 @@ import httpx
 
 from app.models import Variant
 from app.providers.base import BaseProvider
-from app.providers.jackett import _is_movie_category, _normalize, _title_matches
+from app.providers.jackett import _is_movie_category, _normalize, _title_matches, _guess_voice, MAX_LABEL_LEN
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +162,7 @@ class PublicJackettProvider(BaseProvider):
                     size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
                     quality = _guess_quality(title_r)
                     codec = _guess_codec(title_r)
+                    voice = _guess_voice(title_r)
 
                     vid = hashlib.sha1(
                         f"pubjac:{title_r}:{quality}:{seeders}".encode()
@@ -170,9 +171,9 @@ class PublicJackettProvider(BaseProvider):
                     variants.append(
                         Variant(
                             id=vid,
-                            label=f"Public • {quality.upper()}",
+                            label=f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-"),
                             language="multi",
-                            voice="",
+                            voice=voice,
                             quality=quality,
                             size_mb=size_mb,
                             seeders=seeders,

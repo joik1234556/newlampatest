@@ -19,6 +19,7 @@ import httpx
 
 from app.models import Variant
 from app.providers.base import BaseProvider
+from app.providers.jackett import _guess_voice
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,8 @@ class TorrentioProvider(BaseProvider):
             size_mb = _parse_size_mb(combined)
             seeders = _parse_seeders(combined)
             codec = _guess_codec(combined)
+            # Use known dubbing-studio patterns rather than raw stream group name
+            voice = _guess_voice(combined)
 
             # Build magnet
             magnet = f"magnet:?xt=urn:btih:{info_hash}"
@@ -125,6 +128,7 @@ class TorrentioProvider(BaseProvider):
                 magnet += "&tr=" + "&tr=".join(sources)
 
             vid = hashlib.sha1(f"torrentio:{info_hash}:{quality}".encode()).hexdigest()[:12]
+            # Show group name + quality in label; voice field holds the dubbing studio
             label = f"{name} • {quality.upper()}"
 
             variants.append(
@@ -132,7 +136,7 @@ class TorrentioProvider(BaseProvider):
                     id=vid,
                     label=label,
                     language="multi",
-                    voice=name,
+                    voice=voice,
                     quality=quality,
                     size_mb=size_mb,
                     seeders=seeders,

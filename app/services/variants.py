@@ -5,6 +5,7 @@ All cache I/O goes through the async CacheBackend interface.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from typing import Optional
@@ -61,26 +62,31 @@ async def get_variants(
     )
 
     # Build provider pipeline:
-    #   1. TorrentioProvider – real results when tmdb_id is available (no config needed)
-    #   2. JackettProvider   – real results when JACKETT_URL + JACKETT_API_KEY are set
-    #   3. PublicJackettProvider – fallback using public jac.red / jacred.xyz servers
-    providers = [TorrentioProvider(), JackettProvider()]
+    #   TorrentioProvider and JackettProvider run IN PARALLEL for speed.
+    #   PublicJackettProvider is a fallback (only when private Jackett finds nothing).
+    torrentio = TorrentioProvider()
+    jackett   = JackettProvider()
+
+    tasks = [
+        torrentio.search_variants(title, year, tmdb_id, original_title=original_title, season=season),
+        jackett.search_variants(title, year, tmdb_id, original_title=original_title, season=season),
+    ]
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
     all_variants: list[Variant] = []
     jackett_found = 0
-    for provider in providers:
-        try:
-            results = await provider.search_variants(
-                title, year, tmdb_id, original_title=original_title, season=season
-            )
-            all_variants.extend(results)
-            if provider.name == "jackett":
-                jackett_found = len(results)
+    provider_names = [torrentio.name, jackett.name]
+    for provider_name, result in zip(provider_names, raw_results):
+        if isinstance(result, Exception):
+            logger.error("[Easy-Mod][Variants] provider=%s error: %s", provider_name, result)
+        else:
+            all_variants.extend(result)
+            if provider_name == "jackett":
+                jackett_found = len(result)
             logger.info(
                 "[Easy-Mod][Variants] provider=%s returned %d variants",
-                provider.name, len(results),
+                provider_name, len(result) if not isinstance(result, Exception) else 0,
             )
-        except Exception as exc:
-            logger.error("[Easy-Mod][Variants] provider=%s error: %s", provider.name, exc)
 
     # If private Jackett returned nothing, try public Jackett servers as fallback
     if jackett_found == 0:

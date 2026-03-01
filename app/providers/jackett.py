@@ -33,12 +33,28 @@ _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 # Season patterns: "S01", "S1E01", "сезон 1", "season 1"
 _SEASON_RE = re.compile(r"\bS(\d{1,2})(?:E\d+)?\b|\bсезон\s*(\d+)\b|\bseason\s*(\d+)\b", re.IGNORECASE)
 
+# Technical tokens commonly appended to torrent titles (codec, quality, format, tracker …)
+_TECH_TOKENS_RE = re.compile(
+    r"\b(2160p|4k|uhd|1080p|720p|480p|360p|"
+    r"bluray|bdrip|brrip|webrip|web[-_.]?dl|dvdrip|hdtv|"
+    r"x264|x265|hevc|h264|h265|avc|xvid|divx|av1|"
+    r"multi|rus|eng|dub|sub(?:bed|titles?)?|srt|"
+    r"19\d{2}|20\d{2}|"
+    r"hdr10?|dolby|dts|ac3|aac|mp3|flac|"
+    r"yts|rarbg|cm8|galaxyrg|ettv|"
+    r"s\d{1,2}e\d{1,2}|s\d{1,2})\b",
+    re.IGNORECASE,
+)
+
 # Newznab/Jackett movie category range
 _MOVIE_CAT_MIN = 2000
 _MOVIE_CAT_MAX = 2999
 
 # Maximum variants fetched per provider call — stops early HTTP requests
 MAX_VARIANTS = 20
+
+# Maximum characters for the human-readable card label (used by all providers)
+MAX_LABEL_LEN = 55
 
 # Known RU dubbing studio patterns (lowercased needle → display name)
 _VOICE_STUDIOS: list[tuple[str, str]] = [
@@ -117,21 +133,37 @@ def _normalize(text: str) -> str:
     return text
 
 
-def _title_matches(query: str, candidate: str, threshold: float = 0.55) -> bool:
-    """Return True when *candidate* title is sufficiently similar to *query*."""
+def _strip_tech(text: str) -> str:
+    """Remove technical torrent metadata tokens to expose only the core title."""
+    t = _normalize(text)
+    t = _TECH_TOKENS_RE.sub(" ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _title_matches(query: str, candidate: str, threshold: float = 0.82) -> bool:
+    """Return True when *candidate* title is sufficiently similar to *query*.
+
+    Strategy:
+    1. Strip technical tokens (resolution, codec, year, tracker, …) from the
+       candidate so "Inception 2010 1080p BluRay x264" becomes "inception".
+    2. Check direct substring containment on the stripped candidate.
+    3. Fall back to SequenceMatcher ratio on the stripped forms.
+
+    Threshold 0.82 was chosen empirically: it passes "breaking bad" vs
+    "breaking bad lostfilm" (0.88) and rejects "inception" vs "interstellar"
+    (0.55).  The year filter (_year_ok) provides additional protection against
+    same-prefix titles from different years ("Dark Knight" vs "Dark Knight
+    Rises").
+    """
     q = _normalize(query)
-    c = _normalize(candidate)
+    c_stripped = _strip_tech(candidate)
     if not q:
         return True
-    # Fast path: all query words present in candidate
-    query_words = q.split()
-    if query_words and all(w in c.split() for w in query_words):
+    # Direct containment after stripping technical tokens
+    if q in c_stripped:
         return True
-    # Substring containment (handles multi-word queries)
-    if q in c:
-        return True
-    # Fallback: SequenceMatcher ratio
-    return SequenceMatcher(None, q, c).ratio() >= threshold
+    # SequenceMatcher on stripped forms (shorter strings → higher ratios)
+    return SequenceMatcher(None, q, c_stripped).ratio() >= threshold
 
 
 def _is_movie_category(cats: "list[int] | int | None") -> bool:
@@ -190,16 +222,15 @@ class JackettProvider(BaseProvider):
                 add(f"{original_title} S{s2}")
                 add(f"{original_title} Season {season}")
         else:
-            # Primary: title alone (best recall — year is passed as separate param)
-            add(title)
-            # Secondary: original_title alone (catches English-named torrents)
-            if original_title and original_title.lower() != title.lower():
-                add(original_title)
-            # Tertiary: title + year (some indexers need it for disambiguation)
+            # Primary: title + year (most specific — avoids picking up unrelated films)
             if year:
                 add(f"{title} {year}")
                 if original_title and original_title.lower() != title.lower():
                     add(f"{original_title} {year}")
+            # Secondary: title alone (catches results that omit the year)
+            add(title)
+            if original_title and original_title.lower() != title.lower():
+                add(original_title)
 
         return queries
 
@@ -321,13 +352,13 @@ class JackettProvider(BaseProvider):
                 year_in_title = _YEAR_RE.search(title_r)
                 year_str = year_in_title.group(0) if year_in_title else (str(year) if year else "")
 
-                # Build human-readable label: quality + voice + year
-                label_parts = [quality.upper()]
+                # Build human-readable label: voice + quality (no "Jackett" prefix to avoid
+                # the UI showing every card with the same "Jackett" banner)
                 if voice:
-                    label_parts.append(voice)
-                if year_str:
-                    label_parts.append(year_str)
-                label = "Jackett • " + " • ".join(label_parts)
+                    label = f"{voice} • {quality.upper()}"
+                else:
+                    # Fall back to a trimmed torrent title so each card looks unique
+                    label = title_r[:MAX_LABEL_LEN].rstrip(" .-")
 
                 vid = hashlib.sha1(
                     f"jackett:{title_r}:{quality}:{seeders}".encode()

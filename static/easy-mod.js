@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.4';
+    var VERSION = '5.5';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -340,9 +340,10 @@
             if (qc && !qualSeen[qc]) { qualSeen[qc] = true; qualities.push(qc); }
         }
         var hasSeason = seasons && seasons.length > 0;
-        // Show quality/voice even with 1 option when season selector is visible (series)
-        var hasQual  = hasSeason ? qualities.length >= 1 : qualities.length > 1;
-        var hasVoice = hasSeason ? voices.length >= 1   : voices.length > 1;
+        // Always show quality/voice rows when there is at least 1 distinct value
+        // (consistent with modss which always shows its filter bar)
+        var hasQual  = qualities.length >= 1;
+        var hasVoice = voices.length >= 1;
         if (!hasSeason && !hasQual && !hasVoice) { return null; }
 
         var wrap = jq('<div class="em-filters">');

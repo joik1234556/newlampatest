@@ -893,7 +893,7 @@
                 } catch (e) {}
 
                 if (state === 'ready' && resp.direct_url) {
-                    self._dead = true;
+                    self._dead = 'playing';
                     clearTimeout(self._timer);
                     // Check if this torrent has multiple video files (whole-season pack)
                     // If so, show a file picker before playing
@@ -924,7 +924,7 @@
         var m = self._movie || {};
         // Fetch file list from /stream/files
         apiGet('/stream/files', { job_id: jobId }, function (data) {
-            if (self._dead && self._dead !== 'picker') { return; }
+            if (self._dead && self._dead !== 'picker' && self._dead !== 'playing') { return; }
             var files = (data && data.files) || [];
             var videoFiles = files.filter(function (f) { return f.is_video; });
             // If only one video file (or none), play the default URL directly

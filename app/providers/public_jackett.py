@@ -73,19 +73,31 @@ class PublicJackettProvider(BaseProvider):
             url = f"{server.rstrip('/')}/api/v2.0/indexers/all/results"
             server_ok = False
 
-            # ── IMDB-ID search first (exact, no title ambiguity) ──────────────
-            if imdb_id and not season:
+            # ── ID-based search first (exact, no title ambiguity) ─────────────
+            # Priority: tvsearch+imdbid+season (TV) → movie+imdbid (film) → text
+            if imdb_id:
                 imdb_norm = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
-                imdb_params: dict = {
-                    "apikey": "",
-                    "t": "movie",
-                    "imdbid": imdb_norm,
-                    "cat": "2000",
-                }
-                logger.info("[PublicJackettProvider] IMDB search %s imdbid=%s", server, imdb_norm)
+                if season:
+                    # TV series exact search
+                    id_params: dict = {
+                        "apikey": "",
+                        "t": "tvsearch",
+                        "imdbid": imdb_norm,
+                        "season": str(season),
+                        "cat": "2000,5000,5030,5040,5045",
+                    }
+                    logger.info("[PublicJackettProvider] tvsearch %s imdbid=%s season=%s", server, imdb_norm, season)
+                else:
+                    id_params = {
+                        "apikey": "",
+                        "t": "movie",
+                        "imdbid": imdb_norm,
+                        "cat": "2000",
+                    }
+                    logger.info("[PublicJackettProvider] movie search %s imdbid=%s", server, imdb_norm)
                 try:
                     async with httpx.AsyncClient(timeout=15) as client:
-                        resp = await client.get(url, params=imdb_params)
+                        resp = await client.get(url, params=id_params)
                         resp.raise_for_status()
                         data = resp.json()
                     server_ok = True
@@ -114,14 +126,14 @@ class PublicJackettProvider(BaseProvider):
                             language="multi", voice=voice, quality=quality,
                             size_mb=size_mb, seeders=seeders, codec=codec, magnet=magnet,
                         ))
-                    logger.info("[PublicJackettProvider] IMDB search %s found %d results", server, len(variants))
+                    logger.info("[PublicJackettProvider] ID search %s found %d results", server, len(variants))
                     if variants:
-                        break  # got results — no need to try the next server or text queries
+                        break  # got ID-based results — skip text queries and other servers
                 except Exception as exc:
-                    logger.warning("[PublicJackettProvider] IMDB search %s error: %s", server, exc)
+                    logger.warning("[PublicJackettProvider] ID search %s error: %s", server, exc)
 
             if variants:
-                break  # already have IMDB results from this server
+                break  # already have ID-based results
 
             # ── Fallback: text-based query ────────────────────────────────────
             queries: list[str] = []

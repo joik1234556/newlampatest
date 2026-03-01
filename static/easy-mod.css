@@ -94,3 +94,51 @@
     font-size: 0.85em;
     opacity: 0.7;
 }
+
+/* -------------------------------------------------------
+   Filter bar (season / quality / voice)
+   Modss-style horizontal pill buttons
+------------------------------------------------------- */
+.em-filters {
+    padding: 0.5em 1em 0.8em;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+}
+
+.em-filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35em;
+}
+
+.em-filter-label {
+    font-size: 0.82em;
+    opacity: 0.55;
+    min-width: 4.5em;
+    flex-shrink: 0;
+    padding-right: 0.2em;
+}
+
+.em-filter-btn {
+    padding: 0.2em 0.75em;
+    border-radius: 2em;
+    font-size: 0.82em;
+    background: rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, transform 0.1s;
+    display: inline-block;
+}
+
+.em-filter-btn.active {
+    background: #e5531a;
+    color: #fff;
+}
+
+.em-filter-btn.focus {
+    background: rgba(255, 255, 255, 0.22);
+    transform: scale(1.04);
+    outline: none;
+}

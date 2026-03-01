@@ -154,20 +154,17 @@ def _strip_tech(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def _title_matches(query: str, candidate: str, threshold: float = 0.82) -> bool:
+def _title_matches(query: str, candidate: str, threshold: float = 0.85) -> bool:
     """Return True when *candidate* title is sufficiently similar to *query*.
 
     Strategy:
     1. Strip technical tokens (resolution, codec, year, tracker, …) from the
        candidate so "Inception 2010 1080p BluRay x264" becomes "inception".
-    2. Check direct substring containment on the stripped candidate.
+    2. All query words must appear in the stripped candidate (word-boundary check).
     3. Fall back to SequenceMatcher ratio on the stripped forms.
 
-    Threshold 0.82 was chosen empirically: it passes "breaking bad" vs
-    "breaking bad lostfilm" (0.88) and rejects "inception" vs "interstellar"
-    (0.55).  The year filter (_year_ok) provides additional protection against
-    same-prefix titles from different years ("Dark Knight" vs "Dark Knight
-    Rises").
+    Threshold 0.85 was raised from 0.82 to reduce false positives from text search.
+    The year filter (_year_ok) provides additional protection.
     """
     q = _normalize(query)
     c_stripped = _strip_tech(candidate)
@@ -175,6 +172,10 @@ def _title_matches(query: str, candidate: str, threshold: float = 0.82) -> bool:
         return True
     # Direct containment after stripping technical tokens
     if q in c_stripped:
+        return True
+    # All words in the query must appear as whole words in the stripped candidate
+    q_words = q.split()
+    if q_words and all(re.search(r"\b" + re.escape(w) + r"\b", c_stripped) for w in q_words):
         return True
     # SequenceMatcher on stripped forms (shorter strings → higher ratios)
     return SequenceMatcher(None, q, c_stripped).ratio() >= threshold
@@ -361,7 +362,9 @@ class JackettProvider(BaseProvider):
                 logger.info("[JackettProvider] movie search imdbid=%s", imdb_norm)
             await self._id_search(url, id_params, seen_magnets, variants, season=season)
             logger.info("[JackettProvider] ID(imdb) search found %d results for %s", len(variants), imdb_norm)
-            if len(variants) >= MAX_VARIANTS:
+            # If ID search returned any results, do NOT fall back to text search —
+            # text search adds noise (wrong films/series with similar names).
+            if variants:
                 return variants
 
         elif tmdb_id and not season:
@@ -375,7 +378,8 @@ class JackettProvider(BaseProvider):
             logger.info("[JackettProvider] movie search tmdbid=%s", tmdb_id)
             await self._id_search(url, tmdb_params, seen_magnets, variants, season=None)
             logger.info("[JackettProvider] ID(tmdb) search found %d results for tmdb:%s", len(variants), tmdb_id)
-            if len(variants) >= MAX_VARIANTS:
+            # If ID search returned any results, skip text search to avoid noise.
+            if variants:
                 return variants
 
         # ── Fallback: title-based text search ────────────────────────────────

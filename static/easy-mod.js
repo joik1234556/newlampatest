@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.7';
+    var VERSION = '5.8';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -434,6 +434,10 @@
         this._filterSeason  = 0;   // 0 = no season filter (all seasons)
         this._isSeries      = false;
         this._seriesSeasons = [];
+        // Persistent layout containers — filter bar is never destroyed during loading
+        this._filterContainer  = jq('<div class="em-filter-wrap">');
+        this._contentContainer = jq('<div class="em-content-wrap">');
+        this._render.append(this._filterContainer).append(this._contentContainer);
     }
 
     EasyModVariants.prototype.create = function () { return this._render; };
@@ -501,9 +505,11 @@
               (self._filterSeason ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._filterSeason : '') + '\u2026'
             : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
 
-        // For TV series: show season picker IMMEDIATELY before variants load.
-        // This way the user sees and can select the season right away without
-        // waiting for the backend to return results.
+        // Always rebuild the filter bar so it reflects the current season selection.
+        // The filter bar lives in a PERSISTENT container (_filterContainer) that is
+        // never emptied during loading — this prevents the "season buttons disappear
+        // while loading" issue.
+        self._filterContainer.empty();
         if (self._isSeries && self._seriesSeasons.length > 0) {
             var earlyBar = buildFilters(
                 [], '', '', self._filterSeason, self._seriesSeasons,
@@ -517,13 +523,10 @@
                     }
                 }
             );
-            var earlyWrap = jq('<div>');
-            if (earlyBar) { earlyWrap.append(earlyBar); }
-            earlyWrap.append(jq(loadingHtml(loadingLabel)));
-            self._render.html(earlyWrap);
-        } else {
-            self._render.html(loadingHtml(loadingLabel));
+            if (earlyBar) { self._filterContainer.append(earlyBar); }
         }
+        // Show loading spinner in the content area only
+        self._contentContainer.html(loadingHtml(loadingLabel));
 
         var params = {};
         if (title) { params.title = title; }
@@ -568,7 +571,6 @@
         // Destroy previous scroll
         try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) {}
         self._scroll = null;
-        self._render.empty();
 
         // Apply quality/voice client-side filters
         var shown = [];
@@ -579,7 +581,9 @@
             shown.push(v);
         }
 
-        // Filter bar (season + quality + voice)
+        // Rebuild filter bar (season + quality + voice) in the PERSISTENT container.
+        // This means the season row never disappears — only the active button changes.
+        self._filterContainer.empty();
         var filterBar = buildFilters(
             variants, fv, fq,
             self._filterSeason, self._seriesSeasons || [],
@@ -599,16 +603,16 @@
                 }
             }
         );
+        if (filterBar) { self._filterContainer.append(filterBar); }
 
+        // Render variants list in the content container
+        self._contentContainer.empty();
         if (!shown.length) {
-            var emptyWrap = jq('<div style="padding:0 1em">');
-            if (filterBar) { emptyWrap.append(filterBar); }
-            emptyWrap.append(
+            self._contentContainer.append(
                 '<div class="online-empty" style="padding:1em 0">' +
                 '<div class="online-empty__title">\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</div>' +
                 '</div>'
             );
-            self._render.append(emptyWrap);
             try { Lampa.Controller.toggle('content'); } catch (e) {}
             return;
         }
@@ -617,25 +621,23 @@
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
-            if (filterBar) { sc.body().append(filterBar); }
             for (var i = 0; i < shown.length; i++) {
                 (function (v2) {
                     sc.body().append(buildCard(v2, m, function (sel) { self._startStream(sel); }));
                 })(shown[i]);
             }
-            self._render.append(sc.render());
+            self._contentContainer.append(sc.render());
             sc.start();
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
             var list = jq('<div style="padding:0 1em">');
-            if (filterBar) { list.append(filterBar); }
             for (var j = 0; j < shown.length; j++) {
                 (function (v3) {
                     list.append(buildCard(v3, m, function (sel) { self._startStream(sel); }));
                 })(shown[j]);
             }
-            self._render.append(list);
+            self._contentContainer.append(list);
         }
 
         try { Lampa.Controller.toggle('content'); } catch (e) {}

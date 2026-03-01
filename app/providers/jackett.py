@@ -70,7 +70,8 @@ MAX_VARIANTS = 20
 # Maximum characters for the human-readable card label (used by all providers)
 MAX_LABEL_LEN = 55
 
-# Known RU dubbing studio patterns (lowercased needle → display name)
+# Known dubbing studio patterns (lowercased needle → display name)
+# Russian studios
 _VOICE_STUDIOS: list[tuple[str, str]] = [
     ("lostfilm",     "LostFilm"),
     ("лостфильм",    "LostFilm"),
@@ -93,21 +94,44 @@ _VOICE_STUDIOS: list[tuple[str, str]] = [
     ("goblin",       "Гоблин"),
     ("колобок",      "Колобок"),
     ("sdi media",    "SDI Media"),
+    # Ukrainian studios
+    ("кіноколія",    "Кіноколія"),
+    ("kinokoliya",   "Кіноколія"),
+    ("toloka",       "Toloka"),
+    ("толока",       "Toloka"),
+    ("postmodern",   "Postmodern"),
+    ("постмодерн",   "Postmodern"),
+    ("1+1",          "1+1"),
+    ("ictv",         "ICTV"),
+    ("новий канал",  "Новий канал"),
+    ("заголовки",    "Заголовки"),
+    ("zaholovky",    "Заголовки"),
+    ("tvci",         "TVci"),
 ]
+# Regex patterns for language markers
 _DUB_RE = re.compile(r"\bdub\b|\bдубляж\b|\bдублирован", re.IGNORECASE)
 _SUB_RE = re.compile(r"\bsub(?:bed|title)?\b|\bсубтитры\b", re.IGNORECASE)
 _RU_LANG_RE = re.compile(r"\[(?:[^]]*\b(?:rus|рус)\b[^]]*)\]", re.IGNORECASE)
+_UA_LANG_RE = re.compile(
+    r"\bua\b|\bukr\b|\bukrain|\bукр\b|\bукраїн|\[ua\]|\[ukr\]",
+    re.IGNORECASE,
+)
 
 
 def _guess_voice(title: str) -> str:
     """
     Try to extract a dubbing studio or audio type from a torrent title.
     Returns a short display string, or '' if nothing is recognised.
+    Ukrainian indicators take priority over generic RU patterns.
     """
     t = title.lower()
+    # Named studio match (highest priority — most specific)
     for needle, display in _VOICE_STUDIOS:
         if needle in t:
             return display
+    # Ukrainian language marker
+    if _UA_LANG_RE.search(title):
+        return "Укр"
     if _DUB_RE.search(title):
         return "Дубляж"
     if _SUB_RE.search(title):
@@ -217,6 +241,7 @@ class JackettProvider(BaseProvider):
         year: Optional[int],
         original_title: Optional[str],
         season: Optional[int] = None,
+        episode: Optional[int] = None,
     ) -> list[str]:
         """Build ordered list of query strings to try, most specific first."""
         seen: set[str] = set()
@@ -228,7 +253,14 @@ class JackettProvider(BaseProvider):
                 seen.add(key)
                 queries.append(q)
 
-        if season:
+        if season and episode:
+            # Episode-specific queries: S01E03 format (most specific)
+            s2 = f"{season:02d}"
+            e2 = f"{episode:02d}"
+            add(f"{title} S{s2}E{e2}")
+            if original_title and original_title.lower() != title.lower():
+                add(f"{original_title} S{s2}E{e2}")
+        elif season:
             # Season-specific queries: Cyrillic + Latin formats
             s2 = f"{season:02d}"
             add(f"{title} сезон {season}")
@@ -315,6 +347,7 @@ class JackettProvider(BaseProvider):
         original_title: Optional[str] = None,
         season: Optional[int] = None,
         imdb_id: Optional[str] = None,
+        episode: Optional[int] = None,
     ) -> list[Variant]:
         if not JACKETT_URL or not JACKETT_API_KEY:
             logger.debug("[JackettProvider] not configured, skipping")
@@ -342,7 +375,7 @@ class JackettProvider(BaseProvider):
 
         if imdb_norm:
             if season:
-                # TV-series exact search: tvsearch + imdbid + season
+                # TV-series exact search: tvsearch + imdbid + season [+ episode]
                 id_params: dict[str, str] = {
                     "apikey": JACKETT_API_KEY,
                     "t": "tvsearch",
@@ -350,7 +383,9 @@ class JackettProvider(BaseProvider):
                     "season": str(season),
                     "cat": cat_str,
                 }
-                logger.info("[JackettProvider] tvsearch imdbid=%s season=%s", imdb_norm, season)
+                if episode:
+                    id_params["ep"] = str(episode)
+                logger.info("[JackettProvider] tvsearch imdbid=%s season=%s episode=%s", imdb_norm, season, episode)
             else:
                 # Movie exact search: movie + imdbid
                 id_params = {
@@ -362,10 +397,10 @@ class JackettProvider(BaseProvider):
                 logger.info("[JackettProvider] movie search imdbid=%s", imdb_norm)
             await self._id_search(url, id_params, seen_magnets, variants, season=season)
             logger.info("[JackettProvider] ID(imdb) search found %d results for %s", len(variants), imdb_norm)
-            # If ID search returned any results, do NOT fall back to text search —
-            # text search adds noise (wrong films/series with similar names).
-            if variants:
-                return variants
+            # When an exact IMDB ID was used, NEVER fall back to text search:
+            # text search would add unrelated films with similar names.
+            # If ID search returned nothing, return [] so other providers handle it.
+            return variants
 
         elif tmdb_id and not season:
             # Fallback: TMDB-based movie search (when IMDB ID is not available)
@@ -378,12 +413,11 @@ class JackettProvider(BaseProvider):
             logger.info("[JackettProvider] movie search tmdbid=%s", tmdb_id)
             await self._id_search(url, tmdb_params, seen_magnets, variants, season=None)
             logger.info("[JackettProvider] ID(tmdb) search found %d results for tmdb:%s", len(variants), tmdb_id)
-            # If ID search returned any results, skip text search to avoid noise.
-            if variants:
-                return variants
+            # Same: exact TMDB ID — never fall back to text search.
+            return variants
 
-        # ── Fallback: title-based text search ────────────────────────────────
-        queries = self._build_queries(title, year, original_title, season)
+        # ── Fallback: title-based text search (only when no ID was provided) ─
+        queries = self._build_queries(title, year, original_title, season, episode)
         for query in queries:
             params: dict[str, str] = {
                 "apikey": JACKETT_API_KEY,

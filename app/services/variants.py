@@ -37,8 +37,9 @@ def _cache_key(
     tmdb_id: Optional[str],
     season: Optional[int] = None,
     imdb_id: Optional[str] = None,
+    episode: Optional[int] = None,
 ) -> str:
-    raw = f"{title.lower().strip()}:{year or ''}:{tmdb_id or ''}:{imdb_id or ''}:{season or ''}"
+    raw = f"{title.lower().strip()}:{year or ''}:{tmdb_id or ''}:{imdb_id or ''}:{season or ''}:{episode or ''}"
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -49,25 +50,27 @@ async def get_variants(
     original_title: Optional[str] = None,
     season: Optional[int] = None,
     imdb_id: Optional[str] = None,
+    episode: Optional[int] = None,
 ) -> VariantsResponse:
     """
     Return sorted, deduplicated variants for a given title.
     Results are cached for VARIANTS_CACHE_TTL seconds.
     When ``imdb_id`` is supplied providers use exact IMDB-based search
     instead of title text matching, eliminating wrong-film results.
+    Pass ``season`` + ``episode`` for TV-series episode-specific searches.
     """
-    key = _cache_key(title, year, tmdb_id, season, imdb_id)
+    key = _cache_key(title, year, tmdb_id, season, imdb_id, episode)
 
     cached = await variants_cache.aget(key)
     if cached is not None:
-        logger.info("[Easy-Mod][Variants] cache hit title=%s season=%s", title, season)
+        logger.info("[Easy-Mod][Variants] cache hit title=%s season=%s episode=%s", title, season, episode)
         if isinstance(cached, dict):
             return VariantsResponse(**cached)
         return cached  # already a VariantsResponse (in-memory path)
 
     logger.info(
-        "[Easy-Mod][Variants] fetching title=%s year=%s tmdb_id=%s imdb_id=%s original_title=%s season=%s",
-        title, year, tmdb_id, imdb_id, original_title, season,
+        "[Easy-Mod][Variants] fetching title=%s year=%s tmdb_id=%s imdb_id=%s original_title=%s season=%s episode=%s",
+        title, year, tmdb_id, imdb_id, original_title, season, episode,
     )
 
     # Build provider pipeline:
@@ -77,8 +80,8 @@ async def get_variants(
     jackett   = JackettProvider()
 
     tasks = [
-        torrentio.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id),
-        jackett.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id),
+        torrentio.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode),
+        jackett.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode),
     ]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -101,7 +104,7 @@ async def get_variants(
     if jackett_found == 0:
         try:
             pub_results = await PublicJackettProvider().search_variants(
-                title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id,
+                title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode,
             )
             all_variants.extend(pub_results)
             logger.info(
@@ -117,7 +120,7 @@ async def get_variants(
         if ENABLE_DEMO_PROVIDER:
             try:
                 demo = await DemoProvider().search_variants(
-                    title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id,
+                    title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode,
                 )
                 all_variants.extend(demo)
                 logger.info("[Easy-Mod][Variants] provider=demo (fallback) returned %d variants", len(demo))

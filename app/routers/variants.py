@@ -27,6 +27,7 @@ async def variants(
     original_title: Optional[str] = Query(None, description="Original (English) title for better Jackett search"),
     quality: Optional[str] = Query(None, description="Filter by quality tier: 4k|2160p|1080p|720p|480p"),
     season: Optional[int] = Query(None, description="TV series season number (1-based)"),
+    episode: Optional[int] = Query(None, description="TV series episode number (1-based)"),
 ) -> VariantsResponse:
     """
     Return sorted, deduplicated playback variants for a title.
@@ -34,14 +35,14 @@ async def variants(
     Pass ``imdb_id`` (e.g. ``tt0111161``) for exact IMDB-based matching which
     eliminates wrong-film results — providers will use ``t=movie&imdbid=`` on
     Jackett and ``tt{id}`` prefix on Torrentio.
-    Pass ``season`` for TV-series season-specific searches.
+    Pass ``season`` + ``episode`` for TV-series episode-specific searches.
     Optionally filter to a single quality tier with the ``quality`` param.
     """
     if not title.strip():
         raise HTTPException(status_code=400, detail="title must not be empty")
 
     try:
-        result = await get_variants(title.strip(), year, tmdb_id, original_title, season, imdb_id)
+        result = await get_variants(title.strip(), year, tmdb_id, original_title, season, imdb_id, episode)
     except Exception as exc:
         logger.error("[Easy-Mod][/variants] error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc

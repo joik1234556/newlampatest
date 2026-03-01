@@ -1435,7 +1435,7 @@ class TestVariantsImdbIdParam:
         captured_kwargs: dict = {}
 
         async def fake_search(title, year=None, tmdb_id=None, original_title=None,
-                               season=None, imdb_id=None):
+                               season=None, imdb_id=None, episode=None):
             captured_kwargs.update({"imdb_id": imdb_id, "title": title})
             return []
 

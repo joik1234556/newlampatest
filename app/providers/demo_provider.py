@@ -30,6 +30,7 @@ class DemoProvider(BaseProvider):
         original_title: Optional[str] = None,
         season: Optional[int] = None,
         imdb_id: Optional[str] = None,
+        episode: Optional[int] = None,
     ) -> list[Variant]:
         logger.info("[Easy-Mod][DemoProvider] search title=%s year=%s", title, year)
 

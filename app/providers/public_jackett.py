@@ -65,6 +65,7 @@ class PublicJackettProvider(BaseProvider):
         original_title: Optional[str] = None,
         season: Optional[int] = None,
         imdb_id: Optional[str] = None,
+        episode: Optional[int] = None,
     ) -> list[Variant]:
         seen_magnets: set[str] = set()
         variants: list[Variant] = []
@@ -86,7 +87,9 @@ class PublicJackettProvider(BaseProvider):
                         "season": str(season),
                         "cat": "2000,5000,5030,5040,5045",
                     }
-                    logger.info("[PublicJackettProvider] tvsearch %s imdbid=%s season=%s", server, imdb_norm, season)
+                    if episode:
+                        id_params["ep"] = str(episode)
+                    logger.info("[PublicJackettProvider] tvsearch %s imdbid=%s season=%s episode=%s", server, imdb_norm, season, episode)
                 else:
                     id_params = {
                         "apikey": "",
@@ -137,7 +140,11 @@ class PublicJackettProvider(BaseProvider):
 
             # ── Fallback: text-based query ────────────────────────────────────
             queries: list[str] = []
-            if season:
+            if season and episode:
+                queries.append(f"{title} S{season:02d}E{episode:02d}")
+                if original_title and original_title.lower() != title.lower():
+                    queries.append(f"{original_title} S{season:02d}E{episode:02d}")
+            elif season:
                 queries.append(f"{title} S{season:02d}")
                 if original_title and original_title.lower() != title.lower():
                     queries.append(f"{original_title} S{season:02d}")

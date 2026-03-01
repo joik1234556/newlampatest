@@ -42,6 +42,32 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Video file extensions recognised as playable content
+_VIDEO_EXTS = frozenset(
+    (".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".mpg", ".mpeg", ".flv")
+)
+
+
+def _pick_video_file(files: list[dict]) -> dict | None:
+    """
+    Return the best video file from a TorBox torrent file list.
+
+    Strategy:
+    1. Keep only files whose name ends with a known video extension.
+    2. Among those, return the one with the largest reported size.
+    3. If no file has a recognised extension, fall back to the largest file overall.
+    4. If the list is empty, return None.
+    """
+    if not files:
+        return None
+    video_files = [
+        f for f in files
+        if any((f.get("name") or f.get("short_name") or "").lower().endswith(ext) for ext in _VIDEO_EXTS)
+    ]
+    candidates = video_files if video_files else files
+    return max(candidates, key=lambda f: int(f.get("size", 0) or 0), default=None)
+
+
 def _magnet_hash(magnet: str) -> str:
     """SHA-1 hex digest of the raw magnet string."""
     return hashlib.sha1(magnet.encode()).hexdigest()
@@ -214,7 +240,8 @@ async def _process_job(job_id: str) -> None:
                         # If already seeding/completed and files are listed, get link now
                         _READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
                         if ex_state in _READY_STATES and ex_files:
-                            file_id = ex_files[0].get("id")
+                            best_file = _pick_video_file(ex_files)
+                            file_id = best_file.get("id") if best_file else None
                             if file_id is not None:
                                 try:
                                     direct_url = await torbox.request_download_link(
@@ -334,7 +361,8 @@ async def _process_job(job_id: str) -> None:
                     st_imm, len(files_imm), job_id,
                 )
                 if st_imm in _TORBOX_READY_STATES and files_imm:
-                    fid = files_imm[0].get("id")
+                    best_imm = _pick_video_file(files_imm)
+                    fid = best_imm.get("id") if best_imm else None
                     if fid is not None:
                         try:
                             dl_url = await torbox.request_download_link(torrent_id, fid)
@@ -440,7 +468,8 @@ async def _process_job(job_id: str) -> None:
             # TorBox direct links support Range requests — player can stream
             # even while the torrent is still downloading (progressive play).
             if files:
-                file_id = files[0].get("id")
+                best_file = _pick_video_file(files)
+                file_id = best_file.get("id") if best_file else None
                 if file_id is not None:
                     try:
                         direct_url = await torbox.request_download_link(torrent_id, file_id)

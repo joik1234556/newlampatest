@@ -1198,3 +1198,258 @@ class TestFastPathExistingTorrent:
 
         result = asyncio.get_event_loop().run_until_complete(run())
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# IMDB ID exact matching — JackettProvider
+# ---------------------------------------------------------------------------
+
+class TestJackettImdbSearch:
+    """Verify that JackettProvider uses t=movie&imdbid= when imdb_id is supplied."""
+
+    def _make_mock_client(self, mock_response):
+        from unittest.mock import AsyncMock, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = mock_response
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client
+
+    def test_imdb_id_triggers_movie_search_type(self):
+        """When imdb_id is provided, the first Jackett request must use t=movie&imdbid=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        mock_response = {
+            "Results": [
+                {
+                    "Title": "Inception 2010 1080p BluRay LostFilm",
+                    "MagnetUri": "magnet:?xt=urn:btih:aabbccdd00112233445566778899aabb00112233",
+                    "Seeders": 400,
+                    "Size": 8_000_000_000,
+                },
+            ]
+        }
+
+        calls = []
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = self._make_mock_client(mock_response)
+                # Capture every call to client.get
+                original_get = mock_client.get.side_effect
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mock_client.get.return_value
+                mock_client.get.side_effect = capturing_get
+                mock_client_cls.return_value = mock_client
+
+                p = JackettProvider()
+                return await p.search_variants(
+                    "Inception", year=2010, imdb_id="tt1375666"
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+
+        # At least one call must be the IMDB search
+        imdb_calls = [c for c in calls if c.get("t") == "movie" and "imdbid" in c]
+        assert imdb_calls, f"Expected a t=movie&imdbid= call, got: {calls}"
+        assert imdb_calls[0]["imdbid"] == "tt1375666"
+
+    def test_imdb_id_normalised_without_tt_prefix(self):
+        """IMDB IDs without 'tt' prefix should be normalised to 'tt{id}'."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = self._make_mock_client({"Results": []})
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mock_client.get.return_value
+                mock_client.get.side_effect = capturing_get
+                mock_client_cls.return_value = mock_client
+
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021, imdb_id="1160419")
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+        imdb_calls = [c for c in calls if c.get("t") == "movie"]
+        assert imdb_calls, f"No t=movie call made. Got: {calls}"
+        assert imdb_calls[0]["imdbid"] == "tt1160419"
+
+    def test_no_imdb_id_falls_back_to_text_search(self):
+        """Without imdb_id, the search should use t=search&q=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = self._make_mock_client({"Results": []})
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mock_client.get.return_value
+                mock_client.get.side_effect = capturing_get
+                mock_client_cls.return_value = mock_client
+
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021)
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+        text_calls = [c for c in calls if c.get("t") == "search"]
+        assert text_calls, f"Expected t=search calls, got: {calls}"
+        # Must not contain imdbid
+        assert all("imdbid" not in c for c in text_calls)
+
+
+# ---------------------------------------------------------------------------
+# IMDB ID exact matching — TorrentioProvider
+# ---------------------------------------------------------------------------
+
+class TestTorrentioImdbSearch:
+    """Verify that TorrentioProvider prefers IMDB ID URL when imdb_id is supplied."""
+
+    def test_uses_imdb_id_url_when_available(self):
+        """With imdb_id, Torrentio should request tt{id} URL, not tmdb:{id}."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        requested_urls = []
+        mock_response = {
+            "streams": [
+                {
+                    "name": "YIFY",
+                    "title": "Inception 2010 1080p\n👤 500\n💾 8 GB",
+                    "infoHash": "aabbccdd00112233445566778899aabbccddeeff",
+                    "sources": [],
+                }
+            ]
+        }
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                async def capturing_get(url, **kw):
+                    requested_urls.append(url)
+                    return mock_resp
+                mock_client.get = AsyncMock(side_effect=capturing_get)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                p = TorrentioProvider()
+                return await p.search_variants(
+                    "Inception", year=2010, tmdb_id="27205", imdb_id="tt1375666"
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 1
+        # The first URL tried must use IMDB ID format, not TMDB
+        assert any("tt1375666" in u for u in requested_urls), \
+            f"Expected tt1375666 in URLs, got: {requested_urls}"
+        assert not any("tmdb:27205" in u for u in requested_urls), \
+            f"TMDB URL should not be used when IMDB ID is available, got: {requested_urls}"
+
+    def test_falls_back_to_tmdb_when_no_imdb_id(self):
+        """Without imdb_id, Torrentio should use tmdb:{id} URL."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        requested_urls = []
+        mock_response = {"streams": []}
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                async def capturing_get(url, **kw):
+                    requested_urls.append(url)
+                    return mock_resp
+                mock_client.get = AsyncMock(side_effect=capturing_get)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                p = TorrentioProvider()
+                return await p.search_variants("Dune", year=2021, tmdb_id="438631")
+
+        asyncio.get_event_loop().run_until_complete(run())
+        assert any("tmdb:438631" in u for u in requested_urls), \
+            f"Expected tmdb:438631 in URLs, got: {requested_urls}"
+
+    def test_returns_empty_without_any_id(self):
+        """Without tmdb_id or imdb_id, provider should return []."""
+        import asyncio
+        from app.providers.torrentio import TorrentioProvider
+
+        async def run():
+            p = TorrentioProvider()
+            return await p.search_variants("Unknown Film", year=2021)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+
+# ---------------------------------------------------------------------------
+# /variants endpoint — imdb_id param accepted
+# ---------------------------------------------------------------------------
+
+class TestVariantsImdbIdParam:
+    def test_variants_accepts_imdb_id(self, client):
+        """The /variants endpoint must accept imdb_id without error."""
+        resp = client.get("/variants?title=Inception&year=2010&imdb_id=tt1375666")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "variants" in body
+
+    def test_variants_imdb_id_forwarded_to_providers(self, client):
+        """imdb_id from query string must reach the provider search_variants call."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        captured_kwargs: dict = {}
+
+        async def fake_search(title, year=None, tmdb_id=None, original_title=None,
+                               season=None, imdb_id=None):
+            captured_kwargs.update({"imdb_id": imdb_id, "title": title})
+            return []
+
+        # Use a unique title+imdb_id that won't be in any in-memory cache
+        unique_title = "InceptionImdbForwardTest"
+        with patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                   side_effect=fake_search), \
+             patch("app.providers.jackett.JackettProvider.search_variants",
+                   side_effect=fake_search), \
+             patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                   side_effect=fake_search), \
+             patch("app.services.variants.variants_cache.aget", new_callable=AsyncMock,
+                   return_value=None):
+            resp = client.get(f"/variants?title={unique_title}&year=2010&imdb_id=tt1375666")
+
+        assert resp.status_code == 200
+        assert captured_kwargs.get("imdb_id") == "tt1375666"

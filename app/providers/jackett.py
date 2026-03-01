@@ -257,12 +257,12 @@ class JackettProvider(BaseProvider):
         tmdb_id: Optional[str] = None,
         original_title: Optional[str] = None,
         season: Optional[int] = None,
+        imdb_id: Optional[str] = None,
     ) -> list[Variant]:
         if not JACKETT_URL or not JACKETT_API_KEY:
             logger.debug("[JackettProvider] not configured, skipping")
             return []
 
-        queries = self._build_queries(title, year, original_title, season)
         url = f"{JACKETT_URL.rstrip('/')}/api/v2.0/indexers/all/results"
         # For TV series, also include TV categories (5000 range)
         if season:
@@ -276,6 +276,57 @@ class JackettProvider(BaseProvider):
         seen_magnets: set[str] = set()
         variants: list[Variant] = []
 
+        # ── IMDB-ID search (t=movie, exact match — only for non-season queries) ──
+        # When an IMDB ID is available and no season-specific query is needed,
+        # use the Newznab movie search type which supports exact IMDB ID lookup.
+        # This greatly reduces wrong-film results compared to text-based search.
+        if imdb_id and not season:
+            imdb_norm = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+            imdb_params: dict[str, str] = {
+                "apikey": JACKETT_API_KEY,
+                "t": "movie",
+                "imdbid": imdb_norm,
+                "cat": cat_str,
+            }
+            logger.info("[JackettProvider] IMDB search imdbid=%s", imdb_norm)
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.get(url, params=imdb_params)
+                    resp.raise_for_status()
+                    data = resp.json()
+                for r in data.get("Results") or []:
+                    title_r = r.get("Title", "")
+                    magnet = r.get("MagnetUri") or ""
+                    if not magnet.startswith("magnet:?xt=urn:btih"):
+                        continue
+                    if magnet in seen_magnets:
+                        continue
+                    seen_magnets.add(magnet)
+                    seeders  = int(r.get("Seeders", 0) or 0)
+                    size_mb  = int(r.get("Size", 0) or 0) // (1024 * 1024)
+                    quality  = _guess_quality(title_r)
+                    codec    = _guess_codec(title_r)
+                    voice    = _guess_voice(title_r)
+                    vid = hashlib.sha1(
+                        f"jackett:{title_r}:{quality}:{seeders}".encode()
+                    ).hexdigest()[:12]
+                    label = f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-")
+                    variants.append(Variant(
+                        id=vid, label=label, language="ru", voice=voice,
+                        quality=quality, size_mb=size_mb, seeders=seeders,
+                        codec=codec, magnet=magnet,
+                    ))
+                logger.info("[JackettProvider] IMDB search found %d results for %s", len(variants), imdb_norm)
+            except Exception as exc:
+                logger.warning("[JackettProvider] IMDB search error imdbid=%s: %s", imdb_norm, exc)
+
+            # If IMDB search returned results, skip the slower title-based queries
+            if len(variants) >= MAX_VARIANTS:
+                logger.info("[JackettProvider] IMDB search sufficient (%d), skipping title queries", len(variants))
+                return variants
+
+        # ── Fallback: title-based text search ────────────────────────────────
+        queries = self._build_queries(title, year, original_title, season)
         for query in queries:
             params: dict[str, str] = {
                 "apikey": JACKETT_API_KEY,

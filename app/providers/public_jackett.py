@@ -64,25 +64,76 @@ class PublicJackettProvider(BaseProvider):
         tmdb_id: Optional[str] = None,
         original_title: Optional[str] = None,
         season: Optional[int] = None,
+        imdb_id: Optional[str] = None,
     ) -> list[Variant]:
-        # Build query list
-        queries: list[str] = []
-        if season:
-            queries.append(f"{title} S{season:02d}")
-            if original_title and original_title.lower() != title.lower():
-                queries.append(f"{original_title} S{season:02d}")
-        else:
-            primary = f"{title} {year}" if year else title
-            queries.append(primary)
-            if original_title and original_title.lower() != title.lower():
-                queries.append(f"{original_title} {year}" if year else original_title)
-
         seen_magnets: set[str] = set()
         variants: list[Variant] = []
 
         for server in _PUBLIC_SERVERS:
             url = f"{server.rstrip('/')}/api/v2.0/indexers/all/results"
             server_ok = False
+
+            # ── IMDB-ID search first (exact, no title ambiguity) ──────────────
+            if imdb_id and not season:
+                imdb_norm = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+                imdb_params: dict = {
+                    "apikey": "",
+                    "t": "movie",
+                    "imdbid": imdb_norm,
+                    "cat": "2000",
+                }
+                logger.info("[PublicJackettProvider] IMDB search %s imdbid=%s", server, imdb_norm)
+                try:
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        resp = await client.get(url, params=imdb_params)
+                        resp.raise_for_status()
+                        data = resp.json()
+                    server_ok = True
+                    for r in data.get("Results") or []:
+                        title_r = r.get("Title", "")
+                        magnet = r.get("MagnetUri") or ""
+                        if not magnet.startswith("magnet:?xt=urn:btih"):
+                            continue
+                        seeders = int(r.get("Seeders", 0) or 0)
+                        if seeders == 0:
+                            continue
+                        if magnet in seen_magnets:
+                            continue
+                        seen_magnets.add(magnet)
+                        size_bytes = int(r.get("Size", 0) or 0)
+                        size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
+                        quality = _guess_quality(title_r)
+                        codec = _guess_codec(title_r)
+                        voice = _guess_voice(title_r)
+                        vid = hashlib.sha1(
+                            f"pubjac:{title_r}:{quality}:{seeders}".encode()
+                        ).hexdigest()[:12]
+                        variants.append(Variant(
+                            id=vid,
+                            label=f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-"),
+                            language="multi", voice=voice, quality=quality,
+                            size_mb=size_mb, seeders=seeders, codec=codec, magnet=magnet,
+                        ))
+                    logger.info("[PublicJackettProvider] IMDB search %s found %d results", server, len(variants))
+                    if variants:
+                        break  # got results — no need to try the next server or text queries
+                except Exception as exc:
+                    logger.warning("[PublicJackettProvider] IMDB search %s error: %s", server, exc)
+
+            if variants:
+                break  # already have IMDB results from this server
+
+            # ── Fallback: text-based query ────────────────────────────────────
+            queries: list[str] = []
+            if season:
+                queries.append(f"{title} S{season:02d}")
+                if original_title and original_title.lower() != title.lower():
+                    queries.append(f"{original_title} S{season:02d}")
+            else:
+                primary = f"{title} {year}" if year else title
+                queries.append(primary)
+                if original_title and original_title.lower() != title.lower():
+                    queries.append(f"{original_title} {year}" if year else original_title)
 
             for query in queries:
                 params: dict = {

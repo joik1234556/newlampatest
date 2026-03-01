@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '5.5';
+    var VERSION = '5.6';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -492,6 +492,9 @@
                             || (m.first_air_date ? m.first_air_date.slice(0, 4) : '');
         var tmdb  = m.id    || m.tmdb_id || '';
         var orig  = m.original_title || m.original_name || '';
+        // IMDB ID — Lampa exposes it as m.imdb_id (e.g. "tt0111161") or
+        // nested in m.external_ids.imdb_id from TMDB enrichment
+        var imdb  = m.imdb_id || (m.external_ids && m.external_ids.imdb_id) || '';
 
         var loadingLabel = title
             ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
@@ -503,6 +506,7 @@
         if (title) { params.title = title; }
         if (year)  { params.year  = year; }
         if (tmdb)  { params.tmdb_id = tmdb; }
+        if (imdb)  { params.imdb_id = imdb; }
         if (orig && orig !== title) { params.original_title = orig; }
         if (self._filterSeason) { params.season = self._filterSeason; }
 

@@ -76,17 +76,25 @@ class TorrentioProvider(BaseProvider):
         tmdb_id: Optional[str] = None,
         original_title: Optional[str] = None,
         season: Optional[int] = None,
+        imdb_id: Optional[str] = None,
     ) -> list[Variant]:
-        if not tmdb_id:
-            logger.info("[TorrentioProvider] no tmdb_id for '%s', skipping", title)
+        # Prefer IMDB ID (most accurate), fall back to TMDB ID
+        if imdb_id:
+            # Normalise to bare numeric part that Torrentio expects after "tt"
+            imdb_norm = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+            id_prefix = imdb_norm
+        elif tmdb_id:
+            id_prefix = f"tmdb:{tmdb_id}"
+        else:
+            logger.info("[TorrentioProvider] no imdb_id or tmdb_id for '%s', skipping", title)
             return []
 
         # For series with a specific season, query that season (episode 1 for stream info)
         ep_season = season if season else 1
         # Try movie format first, then series format
         candidate_urls = [
-            f"{TORRENTIO_BASE}/stream/movie/tmdb:{tmdb_id}.json",
-            f"{TORRENTIO_BASE}/stream/series/tmdb:{tmdb_id}:{ep_season}:1.json",
+            f"{TORRENTIO_BASE}/stream/movie/{id_prefix}.json",
+            f"{TORRENTIO_BASE}/stream/series/{id_prefix}:{ep_season}:1.json",
         ]
 
         streams: list = []
@@ -146,6 +154,6 @@ class TorrentioProvider(BaseProvider):
             )
 
         logger.info(
-            "[TorrentioProvider] found %d streams for tmdb:%s", len(variants), tmdb_id
+            "[TorrentioProvider] found %d streams for %s", len(variants), id_prefix
         )
         return variants

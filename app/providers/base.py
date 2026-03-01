@@ -23,9 +23,11 @@ class BaseProvider(ABC):
         tmdb_id: Optional[str] = None,
         original_title: Optional[str] = None,
         season: Optional[int] = None,
+        imdb_id: Optional[str] = None,
     ) -> list[Variant]:
         """
         Return a list of Variant objects for the given title.
         Pass ``season`` for TV-series season-specific searches.
+        Pass ``imdb_id`` (e.g. "tt0111161") for exact IMDB-based matching.
         Must never raise — return [] on any error and log internally.
         """

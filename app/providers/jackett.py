@@ -60,6 +60,21 @@ _TECH_TOKENS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same tokens but kept as Latin/ASCII — used to clean Cyrillic-titled candidates
+# before SequenceMatcher comparison (Cyrillic text is preserved, only ASCII tech
+# tokens are removed, so the real title words remain for similarity scoring).
+_CYRILLIC_TECH_RE = re.compile(
+    r"\b(?:2160p|4k|uhd|1080p|720p|480p|360p|"
+    r"bluray|bdrip|brrip|webrip|web[-_.]?dl|dvdrip|hdtv|remux|"
+    r"x264|x265|hevc|h264|h265|avc|xvid|divx|av1|"
+    r"multi|rus|eng|ukr|dub|sub(?:bed|titles?)?|srt|"
+    r"19\d{2}|20\d{2}|"
+    r"hdr10?|dolby|dts|ac3|aac|mp3|flac|"
+    r"yts|rarbg|cm8|galaxyrg|ettv|"
+    r"s\d{1,2}e\d{1,2}|s\d{1,2})\b",
+    re.IGNORECASE,
+)
+
 # Newznab/Jackett movie category range
 _MOVIE_CAT_MIN = 2000
 _MOVIE_CAT_MAX = 2999
@@ -85,7 +100,10 @@ _VOICE_STUDIOS: list[tuple[str, str]] = [
     ("нью студио",   "NewStudio"),
     ("amedia",       "Amedia"),
     ("амедиа",       "Amedia"),
+    ("hdrezka",      "HDRezka"),
     ("jaskier",      "Jaskier"),
+    ("яскер",        "Jaskier"),
+    ("яскір",        "Jaskier"),
     ("жасмин",       "Жасмин"),
     ("кубик в кубе", "Кубик"),
     ("kubik",        "Кубик"),
@@ -223,8 +241,10 @@ def _title_matches(query: str, candidate: str, threshold: float = 0.85) -> bool:
     Cyrillic handling:
     - If the query normalises to empty (pure Cyrillic) AND the candidate has no
       meaningful ASCII title content (c_stripped is empty — only tech tokens were
-      ASCII), perform a raw lowercase comparison.  This handles Cyrillic-script
-      trackers that publish titles in Cyrillic (e.g. "Дюна 2021 1080p BDRip").
+      ASCII), perform a SequenceMatcher comparison on Cyrillic-cleaned forms.
+      ``_CYRILLIC_TECH_RE`` strips ASCII technical tokens while preserving
+      Cyrillic title words, which allows accurate similarity scoring without the
+      false-positive substring match ("Дюна" must NOT match "Дюна: Часть вторая").
     - If the query is Cyrillic but the candidate HAS meaningful ASCII content
       (c_stripped non-empty, e.g. "dune"), return False so the caller can retry
       with the English original_title.
@@ -240,23 +260,14 @@ def _title_matches(query: str, candidate: str, threshold: float = 0.85) -> bool:
             # Let the caller retry with the English original_title.
             return False
         # Both query and candidate are effectively non-ASCII (Cyrillic-only tracker).
-        # Perform a raw lowercase comparison with minimal token stripping.
-        q_raw = re.sub(r"\s+", " ", query.lower()).strip()
-        c_raw = re.sub(
-            r"\b\d{3,4}p\b|\b(?:19|20)\d{2}\b",
-            " ",
-            candidate.lower(),
-            flags=re.IGNORECASE,
-        )
-        c_raw = re.sub(r"\s+", " ", c_raw).strip()
-        if q_raw in c_raw:
-            return True
-        q_words = q_raw.split()
-        if q_words:
-            pats = [re.compile(r"\b" + re.escape(w) + r"\b") for w in q_words]
-            if all(p.search(c_raw) for p in pats):
-                return True
-        return SequenceMatcher(None, q_raw, c_raw).ratio() >= threshold
+        # Strip ASCII technical tokens from both sides, then use SequenceMatcher.
+        # This avoids the false-positive substring match that caused short queries
+        # like "Дюна" to incorrectly match longer titles like "Дюна: Часть вторая".
+        q_clean = _CYRILLIC_TECH_RE.sub(" ", query.lower())
+        q_clean = re.sub(r"\s+", " ", q_clean).strip()
+        c_clean = _CYRILLIC_TECH_RE.sub(" ", candidate.lower())
+        c_clean = re.sub(r"\s+", " ", c_clean).strip()
+        return SequenceMatcher(None, q_clean, c_clean).ratio() >= threshold
     # Direct containment after stripping technical tokens
     if q in c_stripped:
         return True

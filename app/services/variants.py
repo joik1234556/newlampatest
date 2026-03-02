@@ -19,6 +19,7 @@ from app.providers.demo_provider import DemoProvider
 from app.providers.jackett import (
     JackettProvider, MAX_VARIANTS,
     detect_language, guess_quality, guess_codec, guess_voice,
+    _title_matches, _year_ok,
 )
 from app.providers.public_jackett import PublicJackettProvider
 from app.providers.torrentio import TorrentioProvider
@@ -29,21 +30,30 @@ logger = logging.getLogger(__name__)
 _QUALITY_ORDER = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k": 4}
 
 # How many variants to return to the user (top N after dedup+sort).
-# Raised from 4 to 10 so that diverse dubbing/language options are visible.
-_MAX_RESULTS = 10
+# Raised from 10 to 15 so that diverse dubbing/language options are visible.
+_MAX_RESULTS = 15
 
 
 def _quality_rank(q: str) -> int:
     return _QUALITY_ORDER.get(q.lower(), 2)
 
 
-async def _torbox_search_variants(query: str, year: Optional[int]) -> list[Variant]:
+async def _torbox_search_variants(
+    query: str,
+    year: Optional[int],
+    filter_title: str = "",
+    filter_original: Optional[str] = None,
+) -> list[Variant]:
     """
     Query TorBox's native search API for cached torrents.
 
     Converts raw TorBox search results to ``Variant`` objects (all pre-marked
     ``is_cached=True``).  Returns ``[]`` on any error so the caller can
     continue with Jackett/Torrentio normally.
+
+    When ``filter_title`` is provided, results that don't match the target title
+    (checked against both ``filter_title`` and ``filter_original``) are discarded
+    to prevent wrong-film results from TorBox's broad text search.
     """
     search_q = f"{query} {year}" if year else query
     try:
@@ -59,6 +69,25 @@ async def _torbox_search_variants(query: str, year: Optional[int]) -> list[Varia
             continue
         h = r.get("hash") or r.get("info_hash") or ""
         if not h:
+            continue
+        # Filter out results that don't match the target title.
+        # This prevents TorBox's broad search from returning wrong films.
+        if filter_title:
+            title_ok = _title_matches(filter_title, name)
+            if not title_ok and filter_original:
+                title_ok = _title_matches(filter_original, name)
+            if not title_ok:
+                logger.debug(
+                    "[Variants] torbox_search: skip '%s' — title mismatch for '%s'",
+                    name[:60], filter_title,
+                )
+                continue
+        # Year soft-filter (same ±1 tolerance as Jackett)
+        if year and not _year_ok(name, year):
+            logger.debug(
+                "[Variants] torbox_search: skip '%s' — year mismatch (want %s)",
+                name[:60], year,
+            )
             continue
         magnet = f"magnet:?xt=urn:btih:{h}&dn={name}"
         seeders  = int(r.get("seeders") or 0)
@@ -126,7 +155,11 @@ async def get_variants(
     # TorBox already has the content cached we get instant variants without
     # waiting for Jackett's slower Torznab scraping.
     search_title = original_title or title
-    torbox_task = _torbox_search_variants(search_title, year)
+    torbox_task = _torbox_search_variants(
+        search_title, year,
+        filter_title=title,
+        filter_original=original_title if original_title and original_title.lower() != title.lower() else None,
+    )
 
     # Build provider pipeline:
     #   TorrentioProvider and JackettProvider run IN PARALLEL for speed.

@@ -1746,13 +1746,49 @@ class TestHybridTorBoxSearch:
 
         async def run():
             with patch("app.torbox.search_torbox", new=AsyncMock(return_value=fake_results)):
-                return await _torbox_search_variants("Dune Part Two", 2024)
+                return await _torbox_search_variants(
+                    "Dune Part Two", 2024,
+                    filter_title="Dune Part Two",
+                )
 
         variants = asyncio.get_event_loop().run_until_complete(run())
         assert len(variants) == 2
         assert all(v.is_cached for v in variants)
         assert any(v.quality == "1080p" for v in variants)
         assert any(v.quality == "2160p" for v in variants)
+
+    def test_torbox_search_filters_wrong_title(self):
+        """search_torbox() must discard results that don't match the requested title."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        fake_results = [
+            {
+                "hash": "aabbccddeeaabbccddeeaabbccddeeaabbccddee",
+                "name": "Dune Part Two 2024 1080p BluRay",
+                "size": 10 * 1024 * 1024 * 1024,
+                "seeders": 500,
+            },
+            {
+                "hash": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+                "name": "Avatar 2009 1080p BDRip",  # wrong film
+                "size": 8 * 1024 * 1024 * 1024,
+                "seeders": 100,
+            },
+        ]
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=fake_results)):
+                return await _torbox_search_variants(
+                    "Dune Part Two", 2024,
+                    filter_title="Dune Part Two",
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        # Only the Dune result should survive; Avatar must be filtered out
+        assert len(variants) == 1
+        assert "Dune" in variants[0].label or "Dune" in variants[0].magnet
 
     def test_torbox_search_torbox_handles_empty_results(self):
         """search_torbox() should return [] when TorBox returns no results."""
@@ -1891,12 +1927,21 @@ class TestHybridTorBoxSearch:
         assert not _UA_LANG_RE.search("Movie 2024 RUS 1080p")
 
     def test_title_matches_cyrillic_query_cyrillic_candidate(self):
-        """Cyrillic query against Cyrillic candidate must match (raw comparison)."""
+        """Cyrillic query against an exact Cyrillic candidate must match."""
         from app.providers.jackett import _title_matches
-        # Cyrillic query with matching Cyrillic torrent title
+        # Exact Cyrillic match (after stripping tech tokens)
         assert _title_matches("Дюна", "Дюна 2021 1080p BDRip")
-        assert _title_matches("Мавка", "Мавка. Лісова пісня 2023 1080p")
         assert _title_matches("Мавка Лісова пісня", "Мавка. Лісова пісня 2023 BDRip")
+        # Full title match — both start with the same Cyrillic words
+        assert _title_matches("Ігра Престолів", "Ігра Престолів S01 2011 1080p")
+
+    def test_title_matches_cyrillic_does_not_match_sequel(self):
+        """Cyrillic short title must NOT match a sequel with extra subtitle words."""
+        from app.providers.jackett import _title_matches
+        # "Дюна" (2021) must not match "Дюна: Часть вторая" (2024)
+        assert not _title_matches("Дюна", "Дюна: Часть вторая 2024 1080p")
+        # "Матриця" must not match "Матриця: Перезавантаження"
+        assert not _title_matches("Матриця", "Матриця: Перезавантаження 2003 1080p BDRip")
 
     def test_title_matches_cyrillic_query_ascii_candidate_is_false(self):
         """Cyrillic query against ASCII candidate must return False (let caller retry with English)."""
@@ -1911,3 +1956,12 @@ class TestHybridTorBoxSearch:
         # Different Cyrillic titles should not match each other
         assert not _title_matches("Дюна", "Аватар 2009 1080p BDRip")
         assert not _title_matches("Мавка", "Дюна 2021 1080p BDRip")
+
+    def test_guess_voice_hdrezka_and_jaskier_cyrillic(self):
+        """_guess_voice must detect HDRezka and Cyrillic Яскер/Яскір labelling."""
+        from app.providers.jackett import _guess_voice
+        assert _guess_voice("Фільм 2023 1080p HDRezka") == "HDRezka"
+        assert _guess_voice("Film 2023 hdrezka.ag 1080p") == "HDRezka"
+        assert _guess_voice("Фільм 2023 Яскер дубляж 1080p") == "Jaskier"
+        assert _guess_voice("Фільм 2023 Яскір 720p") == "Jaskier"
+        assert _guess_voice("Movie 2023 jaskier 1080p") == "Jaskier"

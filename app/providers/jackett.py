@@ -219,14 +219,44 @@ def _title_matches(query: str, candidate: str, threshold: float = 0.85) -> bool:
 
     Threshold 0.85 was raised from 0.82 to reduce false positives from text search.
     The year filter (_year_ok) provides additional protection.
+
+    Cyrillic handling:
+    - If the query normalises to empty (pure Cyrillic) AND the candidate has no
+      meaningful ASCII title content (c_stripped is empty — only tech tokens were
+      ASCII), perform a raw lowercase comparison.  This handles Cyrillic-script
+      trackers that publish titles in Cyrillic (e.g. "Дюна 2021 1080p BDRip").
+    - If the query is Cyrillic but the candidate HAS meaningful ASCII content
+      (c_stripped non-empty, e.g. "dune"), return False so the caller can retry
+      with the English original_title.
     """
     q = _normalize(query)
     c_stripped = _strip_tech(candidate)
     if not q:
-        # Query is non-ASCII (e.g. Cyrillic) and normalised away.
-        # Don't blindly accept every candidate — let the caller retry with
-        # original_title (English) which will normalise successfully.
-        return False
+        # Query is fully non-ASCII (e.g. pure Cyrillic).
+        # c_stripped is empty when the candidate's only ASCII was technical tokens
+        # (year, resolution, codec …), meaning the title itself is Cyrillic.
+        if c_stripped:
+            # Candidate has meaningful ASCII title content — different script.
+            # Let the caller retry with the English original_title.
+            return False
+        # Both query and candidate are effectively non-ASCII (Cyrillic-only tracker).
+        # Perform a raw lowercase comparison with minimal token stripping.
+        q_raw = re.sub(r"\s+", " ", query.lower()).strip()
+        c_raw = re.sub(
+            r"\b\d{3,4}p\b|\b(?:19|20)\d{2}\b",
+            " ",
+            candidate.lower(),
+            flags=re.IGNORECASE,
+        )
+        c_raw = re.sub(r"\s+", " ", c_raw).strip()
+        if q_raw in c_raw:
+            return True
+        q_words = q_raw.split()
+        if q_words:
+            pats = [re.compile(r"\b" + re.escape(w) + r"\b") for w in q_words]
+            if all(p.search(c_raw) for p in pats):
+                return True
+        return SequenceMatcher(None, q_raw, c_raw).ratio() >= threshold
     # Direct containment after stripping technical tokens
     if q in c_stripped:
         return True

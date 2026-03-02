@@ -215,8 +215,10 @@
         }
         log('play url:', url.slice(0, 80));
         try {
-            Lampa.Player.play({ title: title, url: url, poster: poster, subtitles: [] });
-            try { Lampa.Player.playlist([{ title: title, url: url }]); } catch (e) {}
+            var item = { title: title, url: url };
+            if (poster) { item.poster = poster; }
+            Lampa.Player.play(item);
+            try { Lampa.Player.playlist([item]); } catch(pe) {}
         } catch (e) { log('play error', e.message); }
     }
 

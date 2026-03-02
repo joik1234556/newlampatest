@@ -1758,3 +1758,25 @@ class TestHybridTorBoxSearch:
         assert _UA_LANG_RE.search("Movie 2024 [UKR] x265")
         assert _UA_LANG_RE.search("Фільм 2024 укр дубляж")
         assert not _UA_LANG_RE.search("Movie 2024 RUS 1080p")
+
+    def test_title_matches_cyrillic_query_cyrillic_candidate(self):
+        """Cyrillic query against Cyrillic candidate must match (raw comparison)."""
+        from app.providers.jackett import _title_matches
+        # Cyrillic query with matching Cyrillic torrent title
+        assert _title_matches("Дюна", "Дюна 2021 1080p BDRip")
+        assert _title_matches("Мавка", "Мавка. Лісова пісня 2023 1080p")
+        assert _title_matches("Мавка Лісова пісня", "Мавка. Лісова пісня 2023 BDRip")
+
+    def test_title_matches_cyrillic_query_ascii_candidate_is_false(self):
+        """Cyrillic query against ASCII candidate must return False (let caller retry with English)."""
+        from app.providers.jackett import _title_matches
+        # Cyrillic title vs English torrent — should NOT match; caller must retry with original_title
+        assert not _title_matches("Дюна", "Dune 2021 1080p BluRay x264")
+        assert not _title_matches("Аватар", "Avatar 2009 1080p BluRay")
+
+    def test_title_matches_cyrillic_candidate_does_not_accept_wrong_film(self):
+        """Cyrillic query must NOT match a clearly different Cyrillic title."""
+        from app.providers.jackett import _title_matches
+        # Different Cyrillic titles should not match each other
+        assert not _title_matches("Дюна", "Аватар 2009 1080p BDRip")
+        assert not _title_matches("Мавка", "Дюна 2021 1080p BDRip")

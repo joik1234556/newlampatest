@@ -99,6 +99,12 @@
         ".online-variant{border-left:4px solid #00c853;background:rgba(0,200,83,.08)}",
         ".online-variant.focus{background:rgba(0,200,83,.18)}",
         ".em-online-badge{position:absolute;top:.5em;left:.5em;background:#00c853;color:#fff;padding:.15em .5em;border-radius:.3em;font-size:.75em;font-weight:700}",
+        // Section headers (Online vs Easy-Mod dividers)
+        ".em-section-header{display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;gap:.6em;padding:.5em 0 .7em;font-size:1em;font-weight:700;opacity:.9;margin-top:.5em}",
+        ".em-section-header:first-child{margin-top:0}",
+        ".em-section-header__line{-webkit-box-flex:1;flex:1;height:1px;background:rgba(255,255,255,.15)}",
+        ".em-section-online .em-section-header{color:#00c853}",
+        ".em-section-torrent .em-section-header{color:#168FDF}",
     ].join('');
 
     function injectCSS() {
@@ -700,49 +706,69 @@
         try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) {}
         self._scroll = null;
 
-        // Apply quality/voice/language client-side filters
-        var shown = [];
+        // Separate online (url-based) variants from torrent-based variants.
+        // Online variants are always shown regardless of voice/quality filters
+        // because they represent a single stream per source — not multiple dubbed copies.
+        var _ONLINE_SOURCES = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1 };
+        var HEADER_ONLINE   = '\uD83C\uDF10 \u041e\u043d\u043b\u0430\u0439\u043d \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438';
+        var HEADER_EASYMOD  = '\u26A1 Easy-Mod';
+        var shownOnline = [];
+        // Torrent-only variants list (for building relevant filter pills and filtering)
+        var torrentVariants = [];
         for (var k = 0; k < variants.length; k++) {
             var v = variants[k];
-            if (fv && (v.voice || '') !== fv) { continue; }
-            if (fq && (v.quality || '').toLowerCase() !== fq) { continue; }
-            if (fl && (v.language || '').toLowerCase() !== fl) { continue; }
-            shown.push(v);
+            if (_ONLINE_SOURCES[v.source]) {
+                shownOnline.push(v);
+            } else {
+                torrentVariants.push(v);
+            }
+        }
+        // Apply voice/quality/lang filters only to torrent variants
+        var shownTorrents = [];
+        for (var k2 = 0; k2 < torrentVariants.length; k2++) {
+            var vt = torrentVariants[k2];
+            if (fv && (vt.voice || '') !== fv) { continue; }
+            if (fq && (vt.quality || '').toLowerCase() !== fq) { continue; }
+            if (fl && (vt.language || '').toLowerCase() !== fl) { continue; }
+            shownTorrents.push(vt);
         }
 
-        // Build the full filter bar (season + episode + quality + language + voice).
+        // Build the filter bar from torrent-only variants so voice/quality/lang pills
+        // reflect torrent options (not online providers which have no dubbing variety).
+        // Season/episode come from self._seriesSeasons which applies to all sources.
+        var filterBarOnChange = function (type, val) {
+            if (type === 'quality') {
+                self._filterQuality = val;
+                self._renderVariants();
+            } else if (type === 'voice') {
+                self._filterVoice = val;
+                self._renderVariants();
+            } else if (type === 'lang') {
+                self._filterLang = val;
+                self._renderVariants();
+            } else if (type === 'season') {
+                self._filterSeason  = val;
+                self._filterEpisode = 0;
+                self._allVariants   = [];
+                self._filterVoice   = '';
+                self._filterQuality = '';
+                self._filterLang    = '';
+                self._fetchVariants();
+            } else if (type === 'episode') {
+                self._filterEpisode = val;
+                self._allVariants   = [];
+                self._filterVoice   = '';
+                self._filterQuality = '';
+                self._filterLang    = '';
+                self._fetchVariants();
+            }
+        };
         var filterBar = buildFilters(
-            variants, fv, fq,
+            torrentVariants, fv, fq,
             self._filterSeason, self._seriesSeasons || [],
             self._filterEpisode, self._episodeCounts || {},
             fl,
-            function (type, val) {
-                if (type === 'quality') {
-                    self._filterQuality = val;
-                    self._renderVariants();
-                } else if (type === 'voice') {
-                    self._filterVoice = val;
-                    self._renderVariants();
-                } else if (type === 'lang') {
-                    self._filterLang = val;
-                    self._renderVariants();
-                } else if (type === 'season') {
-                    self._filterSeason  = val;
-                    self._filterEpisode = 0;
-                    self._allVariants   = [];
-                    self._filterVoice   = '';
-                    self._filterQuality = '';
-                    self._filterLang    = '';
-                    self._fetchVariants();
-                } else if (type === 'episode') {
-                    self._filterEpisode = val;
-                    self._allVariants   = [];
-                    self._filterVoice   = '';
-                    self._filterQuality = '';
-                    self._filterLang    = '';
-                    self._fetchVariants();
-                }
-            }
+            filterBarOnChange
         );
 
         // Put EVERYTHING (filter bar + variant cards) inside one Lampa.Scroll.
@@ -751,7 +777,8 @@
         // filter buttons are unreachable when using a remote.
         self._render.empty();
 
-        if (!shown.length) {
+        var totalShown = shownOnline.length + shownTorrents.length;
+        if (!totalShown) {
             // No matching variants — show filter bar + "nothing found" message flat.
             if (filterBar) { self._render.append(filterBar); }
             self._render.append(
@@ -763,17 +790,47 @@
             return;
         }
 
+        // Helper: build a section header element
+        function buildSectionHeader(label) {
+            return jq('<div class="em-section-header">').html(
+                '<span class="em-section-header__line"></span>' +
+                '<span>' + label + '</span>' +
+                '<span class="em-section-header__line"></span>'
+            );
+        }
+
         // Wrap everything in one Lampa.Scroll so d-pad navigates filter buttons + cards.
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
-            // Filter bar goes FIRST inside the scroll body so the user can navigate up to it.
+
+            // Season/episode filter bar goes FIRST so the user can navigate to it.
             if (filterBar) { sc.body().append(filterBar); }
-            for (var i = 0; i < shown.length; i++) {
-                (function (v2) {
-                    sc.body().append(buildCard(v2, m, function (sel) { self._startStream(sel); }));
-                })(shown[i]);
+
+            // ── Online sources section ──────────────────────────────────────────
+            if (shownOnline.length > 0) {
+                var onlineSec = jq('<div class="em-section-online">');
+                onlineSec.append(buildSectionHeader(HEADER_ONLINE));
+                for (var i = 0; i < shownOnline.length; i++) {
+                    (function (vo) {
+                        onlineSec.append(buildCard(vo, m, function (sel) { self._startStream(sel); }));
+                    })(shownOnline[i]);
+                }
+                sc.body().append(onlineSec);
             }
+
+            // ── Easy-Mod (torrent) section ──────────────────────────────────────
+            if (shownTorrents.length > 0) {
+                var torrentSec = jq('<div class="em-section-torrent">');
+                torrentSec.append(buildSectionHeader(HEADER_EASYMOD));
+                for (var j = 0; j < shownTorrents.length; j++) {
+                    (function (vt2) {
+                        torrentSec.append(buildCard(vt2, m, function (sel) { self._startStream(sel); }));
+                    })(shownTorrents[j]);
+                }
+                sc.body().append(torrentSec);
+            }
+
             self._render.append(sc.render());
             sc.start();
             self._scroll = sc;
@@ -781,10 +838,21 @@
             log('Lampa.Scroll error:', scrollErr.message);
             if (filterBar) { self._render.append(filterBar); }
             var list = jq('<div style="padding:0 1em">');
-            for (var j = 0; j < shown.length; j++) {
-                (function (v3) {
-                    list.append(buildCard(v3, m, function (sel) { self._startStream(sel); }));
-                })(shown[j]);
+            if (shownOnline.length > 0) {
+                list.append(buildSectionHeader(HEADER_ONLINE));
+                for (var i2 = 0; i2 < shownOnline.length; i2++) {
+                    (function (vo2) {
+                        list.append(buildCard(vo2, m, function (sel) { self._startStream(sel); }));
+                    })(shownOnline[i2]);
+                }
+            }
+            if (shownTorrents.length > 0) {
+                list.append(buildSectionHeader(HEADER_EASYMOD));
+                for (var j2 = 0; j2 < shownTorrents.length; j2++) {
+                    (function (vt3) {
+                        list.append(buildCard(vt3, m, function (sel) { self._startStream(sel); }));
+                    })(shownTorrents[j2]);
+                }
             }
             self._render.append(list);
         }

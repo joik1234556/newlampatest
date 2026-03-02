@@ -105,6 +105,12 @@
         ".em-section-header__line{-webkit-box-flex:1;flex:1;height:1px;background:rgba(255,255,255,.15)}",
         ".em-section-online .em-section-header{color:#00c853}",
         ".em-section-torrent .em-section-header{color:#168FDF}",
+        // Source tab selector (modss-style source picker)
+        ".em-source-tabs{display:-webkit-box;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;gap:.4em;padding:.4em 0 1.1em;border-bottom:1px solid rgba(255,255,255,.1);margin-bottom:.6em}",
+        ".em-source-tab--online.active{background:rgba(0,200,83,.25)!important;border-color:#00c853!important;color:#00c853!important}",
+        ".em-source-tab--torrent.active{background:rgba(22,143,223,.25)!important;border-color:#168FDF!important;color:#168FDF!important}",
+        ".em-source-tab--online.focus,.em-source-tab--online.active.focus{background:#00c853!important;color:#000!important}",
+        ".em-source-tab--torrent.focus,.em-source-tab--torrent.active.focus{background:#168FDF!important;color:#000!important}",
     ].join('');
 
     function injectCSS() {
@@ -487,6 +493,52 @@
     }
 
     // -------------------------------------------------------
+    // Source tab selector (modss-style: one tab per provider)
+    // Shows only sources that have at least one variant.
+    // Returns null when there is only one source (no tabs needed).
+    // -------------------------------------------------------
+    var _ONLINE_SOURCE_KEYS = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1 };
+    var _SOURCE_KEY_TORRENT = 'torrent';
+    var _SOURCE_LABELS = { rezka: 'HDRezka', kinogo: 'Kinogo', videocdn: 'VideoCDN', kodik: 'Kodik', torrent: 'Easy-Mod' };
+    var _LABEL_ALL         = '\u0412\u0441\u0435';          // "Все"
+    var _HEADER_ONLINE     = '\uD83C\uDF10 \u041e\u043d\u043b\u0430\u0439\u043d \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438';
+    var _HEADER_EASYMOD    = '\u26A1 Easy-Mod';
+
+    function buildSourceTabs(allVariants, activeSource, onChange) {
+        // Collect unique source keys in order of first appearance
+        var seen = {}, sources = [];
+        for (var i = 0; i < allVariants.length; i++) {
+            var sv = allVariants[i];
+            var key = _ONLINE_SOURCE_KEYS[sv.source] ? sv.source : _SOURCE_KEY_TORRENT;
+            if (!seen[key]) {
+                seen[key] = true;
+                sources.push({ key: key, type: _ONLINE_SOURCE_KEYS[sv.source] ? 'online' : _SOURCE_KEY_TORRENT });
+            }
+        }
+        // No tab bar needed when only one source type
+        if (sources.length <= 1) { return null; }
+
+        var wrap = jq('<div class="em-source-tabs">');
+
+        // "Все" (All) tab
+        var allBtn = jq('<div class="em-filter-btn selector">').text(_LABEL_ALL);
+        if (!activeSource) { allBtn.addClass('active'); }
+        allBtn.on('hover:enter click', function () { onChange(''); });
+        wrap.append(allBtn);
+
+        for (var si = 0; si < sources.length; si++) {
+            (function (src) {
+                var btn = jq('<div class="em-filter-btn em-source-tab--' + src.type + ' selector">')
+                    .text(_SOURCE_LABELS[src.key] || src.key);
+                if (activeSource === src.key) { btn.addClass('active'); }
+                btn.on('hover:enter click', function () { onChange(src.key); });
+                wrap.append(btn);
+            })(sources[si]);
+        }
+        return wrap;
+    }
+
+    // -------------------------------------------------------
     // Loading state HTML (modss-style spinner)
     // -------------------------------------------------------
     function loadingHtml(subtitle) {
@@ -510,6 +562,7 @@
         this._filterVoice   = '';
         this._filterQuality = '';
         this._filterLang    = '';
+        this._filterSource  = '';  // '' = all; 'rezka'|'kinogo'|'videocdn'|'kodik' = online source; 'torrent' = Easy-Mod
         this._filterSeason  = 0;   // 0 = no season filter (all seasons)
         this._filterEpisode = 0;   // 0 = no episode filter
         this._isSeries      = false;
@@ -701,23 +754,44 @@
         var fv       = self._filterVoice   || '';
         var fq       = self._filterQuality || '';
         var fl       = self._filterLang    || '';
+        var fs       = self._filterSource  || '';
 
         // Destroy previous scroll
         try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) {}
         self._scroll = null;
 
-        // Separate online (url-based) variants from torrent-based variants.
+        // Build source tabs from the FULL (unfiltered) variant list so all available
+        // sources always appear in the tab bar, even after applying voice/quality filters.
+        var sourceTabBar = buildSourceTabs(variants, fs, function (srcKey) {
+            self._filterSource  = srcKey;
+            self._filterVoice   = '';
+            self._filterQuality = '';
+            self._filterLang    = '';
+            self._renderVariants();
+        });
+
+        // Apply source pre-filter: 'rezka'|'kinogo'|... → online only; 'torrent' → torrent only; '' → all
+        var sourceFiltered = [];
+        for (var sf = 0; sf < variants.length; sf++) {
+            var vsf = variants[sf];
+            if (!fs) {
+                sourceFiltered.push(vsf);
+            } else if (fs === _SOURCE_KEY_TORRENT) {
+                if (!_ONLINE_SOURCE_KEYS[vsf.source]) { sourceFiltered.push(vsf); }
+            } else {
+                if (vsf.source === fs) { sourceFiltered.push(vsf); }
+            }
+        }
+
+        // Separate online variants from torrent-based variants.
         // Online variants are always shown regardless of voice/quality filters
         // because they represent a single stream per source — not multiple dubbed copies.
-        var _ONLINE_SOURCES = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1 };
-        var HEADER_ONLINE   = '\uD83C\uDF10 \u041e\u043d\u043b\u0430\u0439\u043d \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438';
-        var HEADER_EASYMOD  = '\u26A1 Easy-Mod';
         var shownOnline = [];
         // Torrent-only variants list (for building relevant filter pills and filtering)
         var torrentVariants = [];
-        for (var k = 0; k < variants.length; k++) {
-            var v = variants[k];
-            if (_ONLINE_SOURCES[v.source]) {
+        for (var k = 0; k < sourceFiltered.length; k++) {
+            var v = sourceFiltered[k];
+            if (_ONLINE_SOURCE_KEYS[v.source]) {
                 shownOnline.push(v);
             } else {
                 torrentVariants.push(v);
@@ -779,7 +853,8 @@
 
         var totalShown = shownOnline.length + shownTorrents.length;
         if (!totalShown) {
-            // No matching variants — show filter bar + "nothing found" message flat.
+            // No matching variants — show source tabs + filter bar + "nothing found" message flat.
+            if (sourceTabBar) { self._render.append(sourceTabBar); }
             if (filterBar) { self._render.append(filterBar); }
             self._render.append(
                 '<div class="online-empty" style="padding:1em 0">' +
@@ -804,13 +879,16 @@
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
 
-            // Season/episode filter bar goes FIRST so the user can navigate to it.
+            // Source tab selector goes FIRST (above all filters and cards).
+            if (sourceTabBar) { sc.body().append(sourceTabBar); }
+            // Season/episode filter bar goes second.
             if (filterBar) { sc.body().append(filterBar); }
 
             // ── Online sources section ──────────────────────────────────────────
             if (shownOnline.length > 0) {
                 var onlineSec = jq('<div class="em-section-online">');
-                onlineSec.append(buildSectionHeader(HEADER_ONLINE));
+                // Only show the divider header when both sections are visible
+                if (shownTorrents.length > 0) { onlineSec.append(buildSectionHeader(_HEADER_ONLINE)); }
                 for (var i = 0; i < shownOnline.length; i++) {
                     (function (vo) {
                         onlineSec.append(buildCard(vo, m, function (sel) { self._startStream(sel); }));
@@ -822,7 +900,8 @@
             // ── Easy-Mod (torrent) section ──────────────────────────────────────
             if (shownTorrents.length > 0) {
                 var torrentSec = jq('<div class="em-section-torrent">');
-                torrentSec.append(buildSectionHeader(HEADER_EASYMOD));
+                // Only show the divider header when both sections are visible
+                if (shownOnline.length > 0) { torrentSec.append(buildSectionHeader(_HEADER_EASYMOD)); }
                 for (var j = 0; j < shownTorrents.length; j++) {
                     (function (vt2) {
                         torrentSec.append(buildCard(vt2, m, function (sel) { self._startStream(sel); }));
@@ -836,10 +915,11 @@
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
+            if (sourceTabBar) { self._render.append(sourceTabBar); }
             if (filterBar) { self._render.append(filterBar); }
             var list = jq('<div style="padding:0 1em">');
             if (shownOnline.length > 0) {
-                list.append(buildSectionHeader(HEADER_ONLINE));
+                if (shownTorrents.length > 0) { list.append(buildSectionHeader(_HEADER_ONLINE)); }
                 for (var i2 = 0; i2 < shownOnline.length; i2++) {
                     (function (vo2) {
                         list.append(buildCard(vo2, m, function (sel) { self._startStream(sel); }));
@@ -847,7 +927,7 @@
                 }
             }
             if (shownTorrents.length > 0) {
-                list.append(buildSectionHeader(HEADER_EASYMOD));
+                if (shownOnline.length > 0) { list.append(buildSectionHeader(_HEADER_EASYMOD)); }
                 for (var j2 = 0; j2 < shownTorrents.length; j2++) {
                     (function (vt3) {
                         list.append(buildCard(vt3, m, function (sel) { self._startStream(sel); }));

@@ -2116,3 +2116,128 @@ class TestTorBoxSeasonFilter:
         # complete series stays
         complete_present = any("complete" in (v.magnet or "").lower() or "Complete" in v.label for v in variants)
         assert complete_present, f"Complete-series torrent must be kept; variants: {names}"
+
+
+# ---------------------------------------------------------------------------
+# Online providers (Rezka/Kinogo/VideoCDN/Kodik)
+# ---------------------------------------------------------------------------
+
+class TestOnlineProviders:
+    """Verify the online provider infrastructure works end-to-end."""
+
+    def test_variant_model_has_url_and_source_fields(self):
+        """Variant model must expose url and source fields for online providers."""
+        from app.models import Variant
+        v = Variant(
+            id="test01",
+            label="HDRezka • RU • 1080p (Online)",
+            url="https://kodik.info/embed/123",
+            source="rezka",
+            is_cached=True,
+        )
+        assert v.url == "https://kodik.info/embed/123"
+        assert v.source == "rezka"
+        assert v.magnet == ""
+        assert v.is_cached is True  # online = instant
+
+    def test_online_provider_base_returns_empty_on_scraper_error(self):
+        """OnlineProviderBase must return [] if the scraper raises."""
+        import asyncio
+        from app.providers.rezka import RezkaProvider
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch(
+                "app.scraper.rezka.search",
+                new=AsyncMock(side_effect=Exception("network error")),
+            ):
+                return await RezkaProvider().search_variants("Test Movie", year=2024)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == []
+
+    def test_online_provider_base_returns_empty_when_no_files(self):
+        """OnlineProviderBase must return [] when detail page has no files."""
+        import asyncio
+        from app.providers.kinogo import KinogoProvider
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch("app.scraper.kinogo.search", new=AsyncMock(return_value=[
+                {"title": "Test Movie", "year": "2024", "url": "https://kinogo.me/test", "source": "kinogo"},
+            ])):
+                with patch("app.scraper.kinogo.get_detail", new=AsyncMock(return_value={
+                    "title": "Test Movie", "files": [],
+                })):
+                    return await KinogoProvider().search_variants("Test Movie", year=2024)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == []
+
+    def test_online_provider_returns_variants_with_url(self):
+        """OnlineProviderBase must return Variants with url set when scraper succeeds."""
+        import asyncio
+        from app.providers.videocdn import VideoCDNProvider
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch("app.scraper.videocdn.search", new=AsyncMock(return_value=[
+                {"title": "Test", "year": "2024", "url": "https://videocdn.tv/film/test", "source": "videocdn"},
+            ])):
+                with patch("app.scraper.videocdn.get_detail", new=AsyncMock(return_value={
+                    "title": "Test",
+                    "files": [{"title": "Player", "quality": "1080p", "url": "https://videocdn.tv/embed/123", "magnet": None}],
+                })):
+                    return await VideoCDNProvider().search_variants("Test", year=2024)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 1
+        v = variants[0]
+        assert v.url == "https://videocdn.tv/embed/123"
+        assert v.source == "videocdn"
+        assert v.is_cached is True
+        assert v.magnet == ""
+
+    def test_online_variants_sorted_before_torrents_in_service(self):
+        """Online variants must appear first in the sorted output."""
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+        from app.models import Variant
+        from app.services.variants import get_variants
+
+        online_v = Variant(
+            id="online01",
+            label="HDRezka • RU • 1080p (Online)",
+            url="https://rezka.ag/embed/1",
+            source="rezka",
+            is_cached=True,
+        )
+        torrent_v = Variant(
+            id="torrent01",
+            label="LostFilm 1080p",
+            magnet="magnet:?xt=urn:btih:AABBCCDDEEAABBCCDDEEAABBCCDDEEAABBCCDDEE",
+            seeders=500,
+            is_cached=True,
+        )
+
+        async def run():
+            with patch("app.services.variants._torbox_search_variants", new=AsyncMock(return_value=[])):
+                with patch("app.providers.torrentio.TorrentioProvider.search_variants", new=AsyncMock(return_value=[torrent_v])):
+                    with patch("app.providers.jackett.JackettProvider.search_variants", new=AsyncMock(return_value=[])):
+                        with patch("app.providers.rezka.RezkaProvider.search_variants", new=AsyncMock(return_value=[online_v])):
+                            with patch("app.providers.kinogo.KinogoProvider.search_variants", new=AsyncMock(return_value=[])):
+                                with patch("app.providers.videocdn.VideoCDNProvider.search_variants", new=AsyncMock(return_value=[])):
+                                    with patch("app.providers.kodik.KodikProvider.search_variants", new=AsyncMock(return_value=[])):
+                                        with patch("app.cache.variants_cache.aget", new=AsyncMock(return_value=None)):
+                                            with patch("app.cache.variants_cache.aset", new=AsyncMock()):
+                                                with patch("app.torbox.batch_check_cached", new=AsyncMock(return_value={})):
+                                                    return await get_variants("Test Online Movie", year=2024)
+
+        response = asyncio.get_event_loop().run_until_complete(run())
+        assert len(response.variants) >= 1
+        # Online variant must appear before the torrent
+        sources = [v.source for v in response.variants]
+        if "rezka" in sources and "" in sources:
+            rezka_idx = sources.index("rezka")
+            torrent_idx = sources.index("")
+            assert rezka_idx < torrent_idx, "Online variant must be sorted before torrent"

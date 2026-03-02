@@ -23,6 +23,10 @@ from app.providers.jackett import (
 )
 from app.providers.public_jackett import PublicJackettProvider
 from app.providers.torrentio import TorrentioProvider
+from app.providers.rezka import RezkaProvider
+from app.providers.kinogo import KinogoProvider
+from app.providers.videocdn import VideoCDNProvider
+from app.providers.kodik import KodikProvider
 
 logger = logging.getLogger(__name__)
 
@@ -205,13 +209,17 @@ async def get_variants(
 
     # Build provider pipeline:
     #   TorrentioProvider and JackettProvider run IN PARALLEL for speed.
+    #   Online providers (Rezka, Kinogo, VideoCDN, Kodik) also run in parallel —
+    #   they return instant-play variants that are sorted to the top of results.
     #   PublicJackettProvider is a fallback (only when private Jackett finds nothing).
     torrentio = TorrentioProvider()
     jackett   = JackettProvider()
+    online_providers = [RezkaProvider(), KinogoProvider(), VideoCDNProvider(), KodikProvider()]
 
     provider_tasks = [
         torrentio.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode),
         jackett.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode),
+        *[p.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode) for p in online_providers],
     ]
 
     # Gather TorBox search + provider results concurrently
@@ -240,7 +248,7 @@ async def get_variants(
             )
 
     jackett_found = 0
-    provider_names = [torrentio.name, jackett.name]
+    provider_names = [torrentio.name, jackett.name, *[p.name for p in online_providers]]
     for provider_name, result in zip(provider_names, raw_results):
         if isinstance(result, Exception):
             logger.error("[Easy-Mod][Variants] provider=%s error: %s", provider_name, result)
@@ -318,10 +326,12 @@ async def get_variants(
         if v.id in cached_variant_ids:
             v.is_cached = True
 
-    # Sort: cached first, then seeders desc, quality desc, size_mb desc
+    # Sort: online (url-based) first, then cached torrents, then seeders desc, quality desc
+    _ONLINE_SOURCES = frozenset({"rezka", "kinogo", "videocdn", "kodik"})
+
     def _sort_key(v: Variant):
         return (
-            1 if v.is_cached else 0,
+            2 if v.source in _ONLINE_SOURCES else (1 if v.is_cached else 0),
             v.seeders if v.seeders > 0 else -1,
             _quality_rank(v.quality),
             v.size_mb,

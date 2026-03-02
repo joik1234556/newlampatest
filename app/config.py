@@ -31,6 +31,18 @@ REZKA_MIRRORS: list[str] = [
     "https://hdrezka-ua.com/",
 ]
 
+VIDEOCDN_MIRRORS: list[str] = [
+    "https://videocdn.tv/",
+    "https://videocdn.so/",
+    "https://videocdn.net/",
+]
+
+KODIK_MIRRORS: list[str] = [
+    "https://kodik.info/",
+    "https://kodik.cc/",
+    "https://kodik.biz/",
+]
+
 # Request timeout for mirrors (seconds)
 MIRROR_TIMEOUT: int = 10
 

@@ -95,6 +95,10 @@
         ".em-tag--voice{background:rgba(181,141,54,.35)}",
         ".em-tag--lang{background:rgba(24,143,223,.35)}",
         ".em-tag--quality{background:rgba(76,175,80,.25)}",
+        // Online provider (Rezka, Kinogo, etc.) card highlight
+        ".online-variant{border-left:4px solid #00c853;background:rgba(0,200,83,.08)}",
+        ".online-variant.focus{background:rgba(0,200,83,.18)}",
+        ".em-online-badge{position:absolute;top:.5em;left:.5em;background:#00c853;color:#fff;padding:.15em .5em;border-radius:.3em;font-size:.75em;font-weight:700}",
     ].join('');
 
     function injectCSS() {
@@ -304,8 +308,14 @@
         if (v.seeders) {
             imgWrap.append(jq('<div class="em-seeders">').text('\u2b06 ' + v.seeders));
         }
-        // ⚡ Cached badge (instant play)
-        if (v.is_cached) {
+        // Online badge (top-left) — shown for online providers like Rezka/Kinogo
+        var _ONLINE_SRC = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1 };
+        var _onlineSrc = v.source && _ONLINE_SRC[v.source];
+        if (_onlineSrc) {
+            card.addClass('online-variant');
+            imgWrap.append(jq('<div class="em-online-badge">').text('Online'));
+        } else if (v.is_cached) {
+            // ⚡ Cached badge (instant play) — only for torrent-based variants
             imgWrap.append(jq('<div class="em-cached-badge">').text('\u26a1 \u041c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u043e'));
         }
         card.append(imgWrap);
@@ -785,6 +795,14 @@
     EasyModVariants.prototype._startStream = function (variant) {
         var self  = this;
         var m     = self._movie || {};
+
+        // Online variants (Rezka/Kinogo/etc.) have a direct player URL — play instantly.
+        if (variant.url) {
+            log('online variant — play direct:', variant.url.slice(0, 80));
+            playDirect(variant.url, m);
+            return;
+        }
+
         var body  = {
             variant_id: variant.id     || '',
             magnet:     variant.magnet || '',

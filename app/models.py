@@ -25,6 +25,8 @@ class Variant(BaseModel):
     magnet: str = Field("", description="Magnet link")
     torrent_url: Optional[str] = Field(None, description="Torrent file download URL (alternative to magnet)")
     is_cached: bool = Field(False, description="True when TorBox already has this torrent cached (instant play)")
+    url: Optional[str] = Field(None, description="Direct player/stream URL for online providers (no TorBox needed)")
+    source: str = Field("", description="Provider source name, e.g. 'rezka', 'kinogo', 'torrentio'")
 
 
 class VariantsResponse(BaseModel):

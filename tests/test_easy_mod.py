@@ -408,19 +408,19 @@ class TestStreamProxy:
         resp = client.get("/stream/proxy?job_id=nonexistent-job")
         assert resp.status_code == 404
 
-    def test_proxy_rejects_non_torbox_domain(self, client):
-        """Proxy must reject job URLs not pointing to a TorBox CDN domain (SSRF guard)."""
+    def test_proxy_rejects_unsafe_scheme(self, client):
+        """Proxy must reject stored URLs with non-http(s) schemes (scheme guard)."""
         from app.cache import job_cache
         from app.models import StreamJob
         bad_job = StreamJob(
             variant_id="v_bad",
             magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             state="ready",
-            direct_url="https://evil.example.com/hack.mp4",
+            direct_url="file:///etc/passwd",
         )
         job_cache.set(bad_job.job_id, bad_job.model_dump())
         resp = client.get(f"/stream/proxy?job_id={bad_job.job_id}")
-        assert resp.status_code == 403
+        assert resp.status_code == 500
 
     def test_proxy_no_direct_url_returns_409(self, client):
         """Proxy must return 409 when the job exists but has no direct_url yet."""

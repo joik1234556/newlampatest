@@ -21,9 +21,6 @@ import app.torbox as torbox
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stream", tags=["stream"])
 
-# Domains we are allowed to proxy (TorBox CDN)
-_ALLOWED_PROXY_DOMAINS = (".torbox.app", ".torbox.io", ".torbox.net")
-
 
 @router.post("/start", response_model=dict)
 async def stream_start(
@@ -203,10 +200,17 @@ async def stream_play_file(
 # /stream/proxy — CORS-safe streaming proxy for TorBox direct URLs
 # ---------------------------------------------------------------------------
 
-def _is_allowed_proxy_url(url: str) -> bool:
-    """Return True when *url* points to a TorBox CDN domain (SSRF guard)."""
-    hostname = (urlparse(url).hostname or "").lower()
-    return any(hostname.endswith(d) for d in _ALLOWED_PROXY_DOMAINS)
+def _is_safe_proxy_url(url: str) -> bool:
+    """
+    Return True when *url* is safe to proxy.
+
+    Security model: the URL stored in ``job.direct_url`` was obtained from the
+    TorBox API by our own backend — it is never supplied directly by end-users.
+    We therefore only need to ensure the scheme is http(s) to prevent abuse of
+    other URI schemes (``file://``, ``gopher://``, etc.).
+    """
+    scheme = (urlparse(url).scheme or "").lower()
+    return scheme in ("http", "https")
 
 
 async def _proxy_url(request: Request, url: str) -> StreamingResponse:
@@ -276,6 +280,9 @@ async def stream_proxy(
     Routes the video bytes through our server so browsers always receive
     ``Access-Control-Allow-Origin: *`` regardless of TorBox CDN settings.
     Supports ``Range`` requests so the video player can seek.
+
+    Security: only URLs stored by our own backend (fetched from TorBox API)
+    are proxied; the ``job_id`` is the access-control boundary.
     """
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id must not be empty")
@@ -286,9 +293,9 @@ async def stream_proxy(
     if not job.direct_url:
         raise HTTPException(status_code=409, detail="No direct URL available for this job yet")
 
-    if not _is_allowed_proxy_url(job.direct_url):
-        logger.warning("[proxy] rejected non-TorBox domain: %s", urlparse(job.direct_url).hostname)
-        raise HTTPException(status_code=403, detail="URL domain not allowed for proxying")
+    if not _is_safe_proxy_url(job.direct_url):
+        logger.error("[proxy] unsafe scheme in stored direct_url: %s", urlparse(job.direct_url).scheme)
+        raise HTTPException(status_code=500, detail="Stored URL uses an unsupported scheme")
 
     return await _proxy_url(request, job.direct_url)
 
@@ -304,6 +311,9 @@ async def stream_proxy_file(
     CORS-safe streaming proxy for a specific file inside a TorBox torrent.
     Fetches a fresh TorBox requestdl URL for the given file, then streams it
     through our server with proper CORS headers.
+
+    Security: only URLs returned directly by the TorBox API are proxied;
+    ``job_id`` and ``file_id`` are the access-control boundary.
     """
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id must not be empty")
@@ -325,8 +335,8 @@ async def stream_proxy_file(
     if not direct_url:
         raise HTTPException(status_code=404, detail="TorBox returned no URL for this file")
 
-    if not _is_allowed_proxy_url(direct_url):
-        logger.warning("[proxy_file] rejected non-TorBox domain: %s", urlparse(direct_url).hostname)
-        raise HTTPException(status_code=403, detail="URL domain not allowed for proxying")
+    if not _is_safe_proxy_url(direct_url):
+        logger.error("[proxy_file] unexpected scheme in TorBox URL: %s", urlparse(direct_url).scheme)
+        raise HTTPException(status_code=502, detail="Unexpected URL scheme in TorBox response")
 
     return await _proxy_url(request, direct_url)

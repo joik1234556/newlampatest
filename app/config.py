@@ -60,3 +60,7 @@ JACKETT_API_KEY: str = os.getenv("JACKETT_API_KEY", "")
 
 # DemoProvider — set to "1" only in development / testing; off in production
 ENABLE_DEMO_PROVIDER: bool = os.getenv("ENABLE_DEMO_PROVIDER", "0") == "1"
+
+# Minimum number of TorBox-native cached results to treat as a sufficient
+# fast-path hit (skip Jackett/Torrentio for popular titles).
+TORBOX_SEARCH_MIN_RESULTS: int = int(os.getenv("TORBOX_SEARCH_MIN_RESULTS", "3"))

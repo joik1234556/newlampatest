@@ -366,7 +366,7 @@
         // (consistent with modss which always shows its filter bar)
         var hasQual  = qualities.length >= 1;
         var hasVoice = voices.length >= 1;
-        var hasLang  = langs.length >= 2;  // show language filter only when >= 2 distinct languages
+        var hasLang  = langs.length >= 1;  // show language filter whenever at least 1 distinct language found
         if (!hasSeason && !hasQual && !hasVoice && !hasLang) { return null; }
 
         var wrap = jq('<div class="em-filters">');
@@ -616,7 +616,10 @@
         if (year)  { params.year  = year; }
         if (tmdb)  { params.tmdb_id = tmdb; }
         if (imdb)  { params.imdb_id = imdb; }
-        if (orig && orig !== title) { params.original_title = orig; }
+        // Always send original_title when available — even when same as title.
+        // The backend uses it for English-language search (Jackett) and Ukrainian
+        // audio discovery which requires the original (non-Cyrillic) title.
+        if (orig)  { params.original_title = orig; }
         if (self._filterSeason)  { params.season  = self._filterSeason; }
         if (self._filterEpisode) { params.episode = self._filterEpisode; }
 
@@ -624,11 +627,15 @@
             if (self._dead) { return; }
             try {
                 var variants = (data && data.variants && data.variants.length) ? data.variants : [];
-                log('variants loaded N=' + variants.length);
+                log('variants loaded N=' + variants.length + (data.source ? ' source=' + data.source : ''));
                 self._allVariants  = variants;
                 self._filterVoice  = '';
                 self._filterQuality = '';
                 self._filterLang    = '';
+                // Notify user when results came instantly from TorBox global cache
+                if (data.source === 'torbox_direct') {
+                    try { Lampa.Noty.show('\u26a1 \u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u0438\u0437 \u043a\u044d\u0448\u0430 TorBox \u2014 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a!'); } catch (e) {}
+                }
                 self._renderVariants();
             } catch (e) {
                 log('variants render error', e.message);

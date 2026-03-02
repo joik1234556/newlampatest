@@ -223,7 +223,10 @@ def _title_matches(query: str, candidate: str, threshold: float = 0.85) -> bool:
     q = _normalize(query)
     c_stripped = _strip_tech(candidate)
     if not q:
-        return True
+        # Query is non-ASCII (e.g. Cyrillic) and normalised away.
+        # Don't blindly accept every candidate — let the caller retry with
+        # original_title (English) which will normalise successfully.
+        return False
     # Direct containment after stripping technical tokens
     if q in c_stripped:
         return True

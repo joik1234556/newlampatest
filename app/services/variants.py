@@ -12,7 +12,7 @@ import re
 from typing import Optional
 
 from app.cache import variants_cache
-from app.config import ENABLE_DEMO_PROVIDER, VARIANTS_CACHE_TTL
+from app.config import ENABLE_DEMO_PROVIDER, TORBOX_SEARCH_MIN_RESULTS, VARIANTS_CACHE_TTL
 from app import torbox as torbox_client
 from app.models import Variant, VariantsResponse
 from app.providers.demo_provider import DemoProvider
@@ -31,11 +31,6 @@ _QUALITY_ORDER = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k":
 # How many variants to return to the user (top N after dedup+sort).
 # Raised from 4 to 10 so that diverse dubbing/language options are visible.
 _MAX_RESULTS = 10
-
-# Minimum TorBox-cached results required to treat the TorBox search as a
-# sufficient fast-path (skip Jackett/Torrentio wait for popular titles).
-# Reserved for future use when streaming-first response is implemented.
-_TORBOX_SEARCH_MIN_RESULTS = 3
 
 
 def _quality_rank(q: str) -> int:
@@ -152,6 +147,7 @@ async def get_variants(
     all_variants: list[Variant] = []
 
     # Integrate TorBox search results
+    torbox_fast_path = False
     if isinstance(torbox_variants, Exception):
         logger.warning("[Easy-Mod][Variants] torbox_search error: %s", torbox_variants)
         torbox_variants = []
@@ -161,6 +157,12 @@ async def get_variants(
             "[Easy-Mod][Variants] torbox_search returned %d cached variants for title=%s",
             len(torbox_variants), search_title,
         )
+        if len(torbox_variants) >= TORBOX_SEARCH_MIN_RESULTS:
+            torbox_fast_path = True
+            logger.info(
+                "[Easy-Mod][Variants] TorBox fast-path: %d cached variants >= min=%d for title=%s",
+                len(torbox_variants), TORBOX_SEARCH_MIN_RESULTS, search_title,
+            )
 
     jackett_found = 0
     provider_names = [torrentio.name, jackett.name]
@@ -256,11 +258,12 @@ async def get_variants(
     # MAX_VARIANTS (from jackett.py) is used as the provider-level fetch cap.
     final = deduped[:_MAX_RESULTS]
 
-    response = VariantsResponse(title=title, year=year, variants=final)
+    source = "torbox_direct" if torbox_fast_path else None
+    response = VariantsResponse(title=title, year=year, variants=final, source=source)
     # Store as dict so Redis serialisation is straightforward
     await variants_cache.aset(key, response.model_dump(), ttl=VARIANTS_CACHE_TTL)
     logger.info(
-        "[Easy-Mod][Variants] returning %d variants for title=%s season=%s",
-        len(final), title, season,
+        "[Easy-Mod][Variants] returning %d variants for title=%s season=%s source=%s",
+        len(final), title, season, source,
     )
     return response

@@ -31,6 +31,7 @@ class VariantsResponse(BaseModel):
     title: str
     year: Optional[int] = None
     variants: list[Variant] = []
+    source: Optional[str] = Field(None, description="'torbox_direct' when TorBox cache fast-path was used")
 
 
 # ---------------------------------------------------------------------------

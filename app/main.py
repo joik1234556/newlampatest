@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import re
+import uuid
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -33,14 +34,15 @@ from slowapi.errors import RateLimitExceeded
 
 from app import torbox
 from app.scraper import kinogo, rezka
-from app.config import RATE_LIMIT, TORBOX_API_KEY
+from app.config import RATE_LIMIT, TORBOX_API_KEY, TORBOX_SEARCH_MIN_RESULTS
 from app.logging_conf import setup_logging
 from app.limiter_shared import limiter
 from app.routers import health as health_router
 from app.routers import variants as variants_router
 from app.routers import stream as stream_router
 from app.providers.torrentio import TorrentioProvider
-from app.providers.jackett import JackettProvider
+from app.providers.jackett import JackettProvider, guess_quality, guess_codec, guess_voice, detect_language
+from app.models import Variant
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -342,9 +344,53 @@ async def torbox_search(
         return {"results": [], "query": q, "message": ""}
 
     logger.info("torbox_search query=%s tmdb_id=%s year=%s", q, tmdb_id, year)
+    start_time = time.time()
 
+    # ── Hybrid Step 1: TorBox native search (fast path for cached/popular content) ──
+    search_q = f"{q} {year}" if year else q
+    torbox_results = await torbox.search_torbox(search_q, cached_only=True, limit=20)
+    if torbox_results:
+        torbox_variants = []
+        for res in torbox_results:
+            name = res.get("name") or res.get("title") or ""
+            if not name:
+                continue
+            h = res.get("hash") or res.get("info_hash") or ""
+            if not h:
+                continue
+            magnet = f"magnet:?xt=urn:btih:{h}&dn={name}"
+            quality = guess_quality(name)
+            codec = guess_codec(name)
+            voice = guess_voice(name)
+            language = detect_language(name)
+            seeders = int(res.get("seeders") or 0)
+            size_mb = int(res.get("size") or 0) // (1024 * 1024)
+            vid = str(uuid.uuid4())[:12]
+            label = f"{voice} • {quality.upper()}" if voice else name[:55].rstrip(" .-")
+            torbox_variants.append(Variant(
+                id=vid, label=label, language=language, voice=voice,
+                quality=quality, size_mb=size_mb, seeders=seeders,
+                codec=codec, magnet=magnet, is_cached=True,
+            ))
+
+        if len(torbox_variants) >= TORBOX_SEARCH_MIN_RESULTS:
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "torbox_search hybrid: TorBox hit %d results for '%s' (%dms) — skipping providers",
+                len(torbox_variants), q, elapsed_ms,
+            )
+            return {
+                "results": [v.model_dump() for v in torbox_variants],
+                "query": q,
+                "source": "torbox_direct",
+                "message": "",
+            }
+    else:
+        torbox_variants = []
+
+    # ── Hybrid Step 2: Fallback to Jackett / Torrentio ──
     providers = [TorrentioProvider(), JackettProvider()]
-    all_variants = []
+    all_variants = list(torbox_variants)  # include any partial TorBox results
     for provider in providers:
         try:
             results = await provider.search_variants(
@@ -362,9 +408,13 @@ async def torbox_search(
     )
     all_variants = all_variants[:20]
 
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info("torbox_search fallback: %d results for '%s' (%dms)", len(all_variants), q, elapsed_ms)
+
     return {
         "results": [v.model_dump() for v in all_variants],
         "query": q,
+        "source": "providers",
         "message": "",
     }
 

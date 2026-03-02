@@ -558,7 +558,33 @@
             self._episodeCounts  = {};
         }
 
-        self._fetchVariants();
+        // ── Enrich movie object with IMDB ID if not already present ────────
+        // Without imdb_id, Jackett falls back to unreliable text search and may
+        // return wrong films.  The TMDB /external_ids endpoint is fast (~200 ms)
+        // and gives us the exact IMDB ID needed for t=movie/tvsearch&imdbid= queries.
+        var _enrichTmdb = (m.id || m.tmdb_id || '') + '';
+        var _enrichImdb = m.imdb_id || (m.external_ids && m.external_ids.imdb_id) || '';
+        if (_enrichTmdb && !_enrichImdb && typeof fetch !== 'undefined') {
+            var _enrichType = self._isSeries ? 'tv' : 'movie';
+            // Use Lampa's own TMDB API key first; fall back to the same public key
+            // that Lampa itself ships with (hardcoded in Lampa's source).
+            var _enrichKey  = '4ef0d7355d9ffb5151e987764708ce96';
+            try {
+                var _lk = (Lampa.Api && Lampa.Api.key && Lampa.Api.key()) ||
+                          (Lampa.Storage && (Lampa.Storage.get('tmdb_api') || Lampa.Storage.get('tmdb_key') || ''));
+                if (_lk) { _enrichKey = _lk; }
+            } catch (e) {}
+            var _enrichUrl = 'https://api.themoviedb.org/3/' + _enrichType + '/' +
+                             _enrichTmdb + '/external_ids?api_key=' + _enrichKey;
+            log('fetching imdb_id for tmdb=' + _enrichTmdb);
+            fetch(_enrichUrl, { mode: 'cors' })
+                .then(function (r) { return r.json(); })
+                .then(function (d) { if (d && d.imdb_id) { self._movie.imdb_id = d.imdb_id; log('imdb_id=' + d.imdb_id); } })
+                .catch(function () {})
+                .then(function () { self._fetchVariants(); });
+        } else {
+            self._fetchVariants();
+        }
     };
 
     EasyModVariants.prototype._fetchVariants = function () {

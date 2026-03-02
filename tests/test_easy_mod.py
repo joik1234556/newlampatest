@@ -1965,3 +1965,57 @@ class TestHybridTorBoxSearch:
         assert _guess_voice("Фільм 2023 Яскер дубляж 1080p") == "Jaskier"
         assert _guess_voice("Фільм 2023 Яскір 720p") == "Jaskier"
         assert _guess_voice("Movie 2023 jaskier 1080p") == "Jaskier"
+
+
+# ---------------------------------------------------------------------------
+# Season-ok: range packs and complete-series packs
+# ---------------------------------------------------------------------------
+
+class TestSeasonOk:
+    """Unit tests for JackettProvider._season_ok including season ranges and complete packs."""
+
+    def _p(self):
+        from app.providers.jackett import JackettProvider
+        return JackettProvider()
+
+    def test_exact_season_match(self):
+        p = self._p()
+        assert p._season_ok("Breaking Bad S03 1080p", 3)
+        assert p._season_ok("Sherlock сезон 2 BDRip", 2)
+
+    def test_wrong_season_rejected(self):
+        p = self._p()
+        assert not p._season_ok("Breaking Bad S02 1080p", 3)
+        assert not p._season_ok("Game of Thrones S01 1080p", 5)
+
+    def test_no_season_marker_accepted(self):
+        """Torrent with no season marker is kept (could be a full pack)."""
+        p = self._p()
+        assert p._season_ok("Breaking Bad 1080p BDRip", 3)
+
+    def test_no_season_requested_always_accepted(self):
+        p = self._p()
+        assert p._season_ok("Breaking Bad S03 1080p", None)
+        assert p._season_ok("Any Movie 2021", None)
+
+    def test_season_range_within_range(self):
+        """S01-S05 pack must be accepted when requested season is inside the range."""
+        p = self._p()
+        assert p._season_ok("Breaking Bad S01-S05 1080p BDRip", 1)
+        assert p._season_ok("Breaking Bad S01-S05 1080p BDRip", 3)
+        assert p._season_ok("Breaking Bad S01-S05 1080p BDRip", 5)
+        assert p._season_ok("Game of Thrones S01-S08 Complete 1080p", 8)
+
+    def test_season_range_outside_range_rejected(self):
+        """S01-S02 pack must be rejected when requested season is outside the range."""
+        p = self._p()
+        assert not p._season_ok("Breaking Bad S01-S02 1080p", 3)
+        assert not p._season_ok("Show S03-S04 BDRip", 5)
+
+    def test_complete_series_always_accepted(self):
+        """'Complete', 'Full Series', 'Все сезоны' packs are accepted for any season."""
+        p = self._p()
+        assert p._season_ok("Breaking Bad Complete Series 1080p", 5)
+        assert p._season_ok("Sherlock Full Series BluRay 1080p", 2)
+        assert p._season_ok("Гра Престолів Всі Сезони 1080p", 4)
+        assert p._season_ok("The Wire all seasons complete", 3)

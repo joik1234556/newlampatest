@@ -46,6 +46,13 @@ _QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 # Season patterns: "S01", "S1E01", "сезон 1", "season 1"
 _SEASON_RE = re.compile(r"\bS(\d{1,2})(?:E\d+)?\b|\bсезон\s*(\d+)\b|\bseason\s*(\d+)\b", re.IGNORECASE)
+# Season range packs: "S01-S05", "S1-S8", "S01-05"
+_SEASON_RANGE_RE = re.compile(r"\bS(\d{1,2})\s*[-–—]\s*S?(\d{1,2})\b", re.IGNORECASE)
+# Complete / full-series pack indicators (always relevant for any requested season)
+_COMPLETE_RE = re.compile(
+    r"\b(complete|full[\s._-]+series?|все[\s._-]+сезон|все[\s._-]+серии|полный[\s._-]+сериал)\b",
+    re.IGNORECASE,
+)
 
 # Technical tokens commonly appended to torrent titles (codec, quality, format, tracker …)
 _TECH_TOKENS_RE = re.compile(
@@ -366,11 +373,24 @@ class JackettProvider(BaseProvider):
         """
         When a season is requested, check that the torrent title targets that season.
         - If no season requested, always accept.
+        - Complete-series packs ("Complete", "Full Series", "Все сезоны") are always
+          relevant regardless of the specific season requested.
+        - Season range packs ("S01-S05") are accepted when the requested season falls
+          within the range.
         - If torrent title has no season indicator at all, keep it (may be a full-series pack).
         - If it has a season indicator, accept only if it matches.
         """
         if not season:
             return True
+        # "Complete Series", "Full Series", "Все сезоны" etc. — accept for any season
+        if _COMPLETE_RE.search(title_r):
+            return True
+        # Season range packs e.g. "S01-S05": accept if requested season is within range
+        m_range = _SEASON_RANGE_RE.search(title_r)
+        if m_range:
+            s_start = int(m_range.group(1))
+            s_end   = int(m_range.group(2))
+            return s_start <= season <= s_end
         m = _SEASON_RE.search(title_r)
         if not m:
             return True  # no season marker — could be a full-series pack; keep it

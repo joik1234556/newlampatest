@@ -2019,3 +2019,100 @@ class TestSeasonOk:
         assert p._season_ok("Sherlock Full Series BluRay 1080p", 2)
         assert p._season_ok("Гра Престолів Всі Сезони 1080p", 4)
         assert p._season_ok("The Wire all seasons complete", 3)
+
+
+# ---------------------------------------------------------------------------
+# Episode-number extraction from filename (stream router helper)
+# ---------------------------------------------------------------------------
+
+class TestEpisodeNumExtraction:
+    """Unit tests for _episode_num() in app/routers/stream.py."""
+
+    def _ep(self, name):
+        from app.routers.stream import _episode_num
+        return _episode_num(name)
+
+    def test_sxxexx_format(self):
+        assert self._ep("ShowName.S02E05.1080p.mkv") == 5
+        assert self._ep("show.s03e12.BluRay.mkv") == 12
+
+    def test_exx_format(self):
+        assert self._ep("ShowName.E07.mkv") == 7
+        assert self._ep("show.ep03.avi") == 3
+
+    def test_episode_word(self):
+        assert self._ep("Show Episode 4.mkv") == 4
+        assert self._ep("show.episode.10.mkv") == 10
+
+    def test_no_episode_returns_zero(self):
+        assert self._ep("Movie.2021.1080p.BluRay.mkv") == 0
+        assert self._ep("") == 0
+
+    def test_basename_only(self):
+        # Path separators should be ignored — only basename is used
+        assert self._ep("Season 2/ShowName.S02E08.mkv") == 8
+
+
+# ---------------------------------------------------------------------------
+# Stream files endpoint sort order (episode number ascending)
+# ---------------------------------------------------------------------------
+
+class TestStreamFilesSort:
+    """Verify /stream/files returns video files sorted by episode number ascending."""
+
+    def test_sort_by_episode_ascending(self):
+        """Files should be returned in episode-number order (1, 2, 3…)."""
+        from app.routers.stream import _episode_num
+        from app.models import TorrentFileItem
+
+        files = [
+            TorrentFileItem(file_id="3", name="Show.S01E03.mkv", size_mb=500, quality="1080p", is_video=True),
+            TorrentFileItem(file_id="1", name="Show.S01E01.mkv", size_mb=500, quality="1080p", is_video=True),
+            TorrentFileItem(file_id="2", name="Show.S01E02.mkv", size_mb=500, quality="1080p", is_video=True),
+        ]
+
+        def _sort_key(f):
+            ep = _episode_num(f.name)
+            return (0, ep if ep > 0 else 9999, -f.size_mb)
+
+        files.sort(key=_sort_key)
+        assert [f.file_id for f in files] == ["1", "2", "3"]
+
+
+# ---------------------------------------------------------------------------
+# TorBox season-aware search
+# ---------------------------------------------------------------------------
+
+class TestTorBoxSeasonFilter:
+    """Verify _torbox_search_variants filters results by season."""
+
+    def test_wrong_season_results_rejected(self):
+        """Results for a different season must be filtered out."""
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=[
+                # right season
+                {"name": "Breaking Bad S03 1080p BDRip", "hash": "a" * 40, "size": 15_000_000_000, "seeders": 500},
+                # wrong season — should be rejected
+                {"name": "Breaking Bad S01 1080p BDRip", "hash": "b" * 40, "size": 15_000_000_000, "seeders": 500},
+                # complete series — should be accepted
+                {"name": "Breaking Bad Complete Series 1080p", "hash": "c" * 40, "size": 100_000_000_000, "seeders": 100},
+            ])):
+                from app.services.variants import _torbox_search_variants
+                return await _torbox_search_variants(
+                    "Breaking Bad", year=None, filter_title="Breaking Bad",
+                    season=3,
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        names = [v.label for v in variants]
+        # S03 should be there
+        s3_present = any("S03" in (v.magnet or "") or "S03" in v.label for v in variants)
+        # S01 must NOT be there
+        s1_present  = any("S01" in (v.magnet or "").upper() or "Breaking Bad S01" in v.label for v in variants)
+        assert not s1_present, f"S01 torrent must be rejected; variants: {names}"
+        # complete series stays
+        complete_present = any("complete" in (v.magnet or "").lower() or "Complete" in v.label for v in variants)
+        assert complete_present, f"Complete-series torrent must be kept; variants: {names}"

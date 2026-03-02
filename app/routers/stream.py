@@ -7,6 +7,7 @@ GET  /stream/proxy  — CORS-safe proxy for TorBox direct URLs
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlparse
 
 import httpx
@@ -96,6 +97,32 @@ _VIDEO_EXTS = frozenset(
     (".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".mpg", ".mpeg", ".flv")
 )
 
+# Patterns to extract episode number from a filename, in priority order.
+# Captures: SxxExx, Exx/EPxx, "episode N".
+# The standalone-number pattern is intentionally limited to 1-2 digits (1-99)
+# to avoid false-positive matches with years (2021), resolutions (1080/720),
+# or other 3–4 digit metadata that commonly appear in video filenames.
+_EP_RE = re.compile(
+    r"[Ss]\d{1,2}[Ee](\d{1,3})"          # S01E03 → group 1
+    r"|[Ee][Pp]?(\d{1,3})"               # E03, EP03 → group 2
+    r"|\bepisode\s*(\d{1,3})\b"          # episode 3 → group 3
+    r"|(?:^|[\s._\-])0*([1-9]\d?)(?:v\d)?(?:[\s._\-]|$)",  # standalone 1-99 → group 4
+    re.IGNORECASE,
+)
+
+
+def _episode_num(name: str) -> int:
+    """Extract episode number from a filename. Returns 0 when not found (sorts last)."""
+    # Use only the basename, not directory parts
+    basename = name.split("/")[-1].split("\\")[-1]
+    m = _EP_RE.search(basename)
+    if not m:
+        return 0
+    for g in m.groups():
+        if g is not None:
+            return int(g)
+    return 0
+
 
 @router.get("/files", response_model=TorrentFilesResponse)
 @limiter.limit("60/minute")
@@ -147,8 +174,16 @@ async def stream_files(
             is_video=is_video,
         ))
 
-    # Sort: video files first, then by size desc (largest = main feature / best episode)
-    items.sort(key=lambda f: (0 if f.is_video else 1, -f.size_mb))
+    # Sort: video files first; within video files sort by episode number ascending
+    # (ep 0 = no episode detected → sort to end within video group).
+    # Non-video files follow after all video files, sorted by size desc.
+    def _sort_key(f: TorrentFileItem) -> tuple:
+        if f.is_video:
+            ep = _episode_num(f.name)
+            return (0, ep if ep > 0 else 9999, -f.size_mb)
+        return (1, 9999, -f.size_mb)
+
+    items.sort(key=_sort_key)
 
     return TorrentFilesResponse(
         job_id=job_id.strip(),

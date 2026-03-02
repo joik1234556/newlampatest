@@ -19,7 +19,7 @@ from app.providers.demo_provider import DemoProvider
 from app.providers.jackett import (
     JackettProvider, MAX_VARIANTS,
     detect_language, guess_quality, guess_codec, guess_voice,
-    _title_matches, _year_ok,
+    _title_matches, _year_ok, _SEASON_RE, _SEASON_RANGE_RE, _COMPLETE_RE,
 )
 from app.providers.public_jackett import PublicJackettProvider
 from app.providers.torrentio import TorrentioProvider
@@ -43,6 +43,8 @@ async def _torbox_search_variants(
     year: Optional[int],
     filter_title: str = "",
     filter_original: Optional[str] = None,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
 ) -> list[Variant]:
     """
     Query TorBox's native search API for cached torrents.
@@ -54,8 +56,19 @@ async def _torbox_search_variants(
     When ``filter_title`` is provided, results that don't match the target title
     (checked against both ``filter_title`` and ``filter_original``) are discarded
     to prevent wrong-film results from TorBox's broad text search.
+
+    When ``season`` is provided, results are filtered to only include torrents
+    whose title matches the requested season (exact, range, or complete-series).
     """
-    search_q = f"{query} {year}" if year else query
+    # Build the most specific search query possible
+    if season and episode:
+        search_q = f"{query} S{season:02d}E{episode:02d}"
+    elif season:
+        search_q = f"{query} S{season:02d}"
+        if year:
+            search_q = f"{query} {year} S{season:02d}"
+    else:
+        search_q = f"{query} {year}" if year else query
     try:
         results = await torbox_client.search_torbox(search_q, cached_only=True, limit=20)
     except Exception as exc:
@@ -89,6 +102,33 @@ async def _torbox_search_variants(
                 name[:60], year,
             )
             continue
+        # Season filter: when a specific season is requested, reject torrents that
+        # contain a different season marker in their name.
+        if season:
+            name_ok = False
+            if _COMPLETE_RE.search(name):
+                name_ok = True  # complete-series pack — relevant for any season
+            else:
+                m_range = _SEASON_RANGE_RE.search(name)
+                if m_range:
+                    s_start = int(m_range.group(1))
+                    s_end   = int(m_range.group(2))
+                    name_ok = s_start <= season <= s_end
+                else:
+                    m_season = _SEASON_RE.search(name)
+                    if not m_season:
+                        name_ok = True  # no season marker — could be full-series pack
+                    else:
+                        # Extract the matched season number from whichever group captured it
+                        found_str = next((g for g in m_season.groups() if g is not None), "0")
+                        found = int(found_str)
+                        name_ok = found == season
+            if not name_ok:
+                logger.debug(
+                    "[Variants] torbox_search: skip '%s' — season mismatch (want S%02d)",
+                    name[:60], season,
+                )
+                continue
         magnet = f"magnet:?xt=urn:btih:{h}&dn={name}"
         seeders  = int(r.get("seeders") or 0)
         size_bytes = int(r.get("size") or 0)
@@ -159,6 +199,8 @@ async def get_variants(
         search_title, year,
         filter_title=title,
         filter_original=original_title if original_title and original_title.lower() != title.lower() else None,
+        season=season,
+        episode=episode,
     )
 
     # Build provider pipeline:

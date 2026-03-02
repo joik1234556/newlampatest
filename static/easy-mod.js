@@ -401,7 +401,7 @@
             eg.append(eAll);
             for (var ei = 0; ei < episodes.length; ei++) {
                 (function (ep) {
-                    var ebtn = jq('<div class="em-filter-btn selector">').text(String(ep));
+                    var ebtn = jq('<div class="em-filter-btn selector">').text('\u0421\u0435\u0440\u0438\u044f ' + ep);
                     if (activeEpisode === ep) { ebtn.addClass('active'); }
                     ebtn.on('hover:enter click', function () { onChange('episode', ep); });
                     eg.append(ebtn);
@@ -812,6 +812,7 @@
                         job_id:    jobId,
                         movie:     m,
                         variant:   variant,
+                        episode:   self._filterEpisode || 0,
                     });
                 } catch (e) { log('push wait error', e.message); }
             } catch (e) { log('_startStream response error', e.message); }
@@ -844,6 +845,7 @@
         this._movie   = (object && object.movie)   || {};
         this._variant = (object && object.variant) || {};
         this._jobId   = (object && object.job_id)  || '';
+        this._episode = (object && object.episode) || 0;  // requested episode number (0 = none)
         this._render  = jq('<div class="easy-mod-page em-wait" style="padding:2em;min-height:10em">');
         this._dead    = false;
         this._timer   = null;
@@ -956,6 +958,7 @@
     EasyModWait.prototype._maybeShowFilePicker = function (defaultUrl, jobId) {
         var self = this;
         var m = self._movie || {};
+        var wantEp = self._episode || 0;
         // Fetch file list from /stream/files
         apiGet('/stream/files', { job_id: jobId }, function (data) {
             if (self._dead && self._dead !== 'picker' && self._dead !== 'playing') { return; }
@@ -966,6 +969,22 @@
                 playDirect(defaultUrl, m);
                 return;
             }
+            // When a specific episode was requested, try to auto-match it.
+            // The backend already returns files sorted by episode number ascending.
+            if (wantEp) {
+                var matched = null;
+                for (var i = 0; i < videoFiles.length; i++) {
+                    if (_fileEpNum(videoFiles[i].name) === wantEp) { matched = videoFiles[i]; break; }
+                }
+                if (matched) {
+                    // Auto-play the matched episode — no picker needed
+                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(matched.file_id) }, function (resp) {
+                        if (resp && resp.direct_url) { playDirect(resp.direct_url, m); }
+                        else { playDirect(defaultUrl, m); }
+                    }, function () { playDirect(defaultUrl, m); });
+                    return;
+                }
+            }
             // Multiple video files — show picker
             self._showFilePicker(videoFiles, jobId, defaultUrl, m);
         }, function () {
@@ -974,19 +993,37 @@
         });
     };
 
+    // Extract episode number from a filename (client-side mirror of _episode_num() in app/routers/stream.py).
+    // NOTE: Keep this in sync with the Python implementation when changing episode-detection patterns.
+    function _fileEpNum(name) {
+        var basename = (name || '').split(/[\\/]/).pop();
+        // SxxExx (highest priority — most explicit)
+        var m = basename.match(/[Ss]\d{1,2}[Ee](\d{1,3})/);
+        if (m) { return parseInt(m[1], 10); }
+        // Exx or EPxx
+        m = basename.match(/[Ee][Pp]?(\d{1,3})/);
+        if (m) { return parseInt(m[1], 10); }
+        // episode N
+        m = basename.match(/episode\s*(\d{1,3})/i);
+        if (m) { return parseInt(m[1], 10); }
+        return 0;
+    }
+
     EasyModWait.prototype._showFilePicker = function (files, jobId, defaultUrl, m) {
         var self = this;
         self._render.empty();
         var wrap = jq('<div class="em-wait" style="padding:1em 1.5em">');
         wrap.append(jq('<div class="em-wait__msg" style="margin-bottom:.7em">').text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0435\u0440\u0438\u044e:'));
         var listEl = jq('<div class="em-file-list">');
+        // files arrive pre-sorted by episode number ascending from the backend
         for (var fi = 0; fi < files.length; fi++) {
             (function (f) {
                 var item = jq('<div class="em-file-item selector">');
                 var name = f.name || String(f.file_id);
-                // Shorten: show only basename
-                var basename = name.split(/[\\/]/).pop();
-                item.append(jq('<span class="em-file-name">').text(basename));
+                // Prefer "Серия N" label when episode number is detectable
+                var epNum = _fileEpNum(name);
+                var label = epNum ? ('\u0421\u0435\u0440\u0438\u044f ' + epNum) : name.split(/[\\/]/).pop();
+                item.append(jq('<span class="em-file-name">').text(label));
                 if (f.quality) {
                     item.append(jq('<span class="em-file-quality">').text(f.quality.toUpperCase()));
                 }

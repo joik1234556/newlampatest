@@ -499,10 +499,9 @@
         this._isSeries      = false;
         this._seriesSeasons = [];
         this._episodeCounts = {};  // season_number → episode_count
-        // Persistent layout containers — filter bar is never destroyed during loading
-        this._filterContainer  = jq('<div class="em-filter-wrap">');
-        this._contentContainer = jq('<div class="em-content-wrap">');
-        this._render.append(this._filterContainer).append(this._contentContainer);
+        // No persistent sub-containers — everything is rebuilt into _render directly,
+        // placing filter buttons AND variant cards inside a single Lampa.Scroll so that
+        // Android TV remote d-pad navigation can reach all selector elements.
     }
 
     EasyModVariants.prototype.create = function () { return this._render; };
@@ -605,11 +604,11 @@
               (self._filterEpisode ? ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + self._filterEpisode : '') + '\u2026'
             : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
 
-        // Always rebuild the filter bar so it reflects the current season/episode selection.
-        // The filter bar lives in a PERSISTENT container (_filterContainer) that is
-        // never emptied during loading — this prevents the "season buttons disappear
-        // while loading" issue.
-        self._filterContainer.empty();
+        // Rebuild render with filter bar (for season/episode selection) + loading spinner.
+        // We render them flat (not inside Lampa.Scroll) so the spinner is visible immediately
+        // while results are fetched.  _renderVariants will replace all of this with a proper
+        // Lampa.Scroll once the variants arrive.
+        self._render.empty();
         if (self._isSeries && self._seriesSeasons.length > 0) {
             var earlyBar = buildFilters(
                 [], '', '', self._filterSeason, self._seriesSeasons,
@@ -633,10 +632,9 @@
                     }
                 }
             );
-            if (earlyBar) { self._filterContainer.append(earlyBar); }
+            if (earlyBar) { self._render.append(earlyBar); }
         }
-        // Show loading spinner in the content area only
-        self._contentContainer.html(loadingHtml(loadingLabel));
+        self._render.append(jq('<div>').html(loadingHtml(loadingLabel)));
 
         var params = {};
         if (title) { params.title = title; }
@@ -702,9 +700,7 @@
             shown.push(v);
         }
 
-        // Rebuild filter bar (season + episode + quality + language + voice) in the PERSISTENT container.
-        // This means the season/episode rows never disappear — only active buttons change.
-        self._filterContainer.empty();
+        // Build the full filter bar (season + episode + quality + language + voice).
         var filterBar = buildFilters(
             variants, fv, fq,
             self._filterSeason, self._seriesSeasons || [],
@@ -738,12 +734,17 @@
                 }
             }
         );
-        if (filterBar) { self._filterContainer.append(filterBar); }
 
-        // Render variants list in the content container
-        self._contentContainer.empty();
+        // Put EVERYTHING (filter bar + variant cards) inside one Lampa.Scroll.
+        // This is critical for Android TV: only elements inside the Scroll are reachable
+        // with the TV remote d-pad.  Having them in separate sibling containers means the
+        // filter buttons are unreachable when using a remote.
+        self._render.empty();
+
         if (!shown.length) {
-            self._contentContainer.append(
+            // No matching variants — show filter bar + "nothing found" message flat.
+            if (filterBar) { self._render.append(filterBar); }
+            self._render.append(
                 '<div class="online-empty" style="padding:1em 0">' +
                 '<div class="online-empty__title">\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</div>' +
                 '</div>'
@@ -752,27 +753,30 @@
             return;
         }
 
-        // Wrap in Lampa.Scroll (like modss), fallback to plain list
+        // Wrap everything in one Lampa.Scroll so d-pad navigates filter buttons + cards.
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
+            // Filter bar goes FIRST inside the scroll body so the user can navigate up to it.
+            if (filterBar) { sc.body().append(filterBar); }
             for (var i = 0; i < shown.length; i++) {
                 (function (v2) {
                     sc.body().append(buildCard(v2, m, function (sel) { self._startStream(sel); }));
                 })(shown[i]);
             }
-            self._contentContainer.append(sc.render());
+            self._render.append(sc.render());
             sc.start();
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
+            if (filterBar) { self._render.append(filterBar); }
             var list = jq('<div style="padding:0 1em">');
             for (var j = 0; j < shown.length; j++) {
                 (function (v3) {
                     list.append(buildCard(v3, m, function (sel) { self._startStream(sel); }));
                 })(shown[j]);
             }
-            self._contentContainer.append(list);
+            self._render.append(list);
         }
 
         try { Lampa.Controller.toggle('content'); } catch (e) {}

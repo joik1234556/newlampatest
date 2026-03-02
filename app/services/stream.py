@@ -47,6 +47,10 @@ _VIDEO_EXTS = frozenset(
     (".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".mpg", ".mpeg", ".flv")
 )
 
+# Extensions with best browser codec support (MP4/AAC is universally supported;
+# MKV/AVI often contain AC3/DTS audio that browsers cannot play)
+_BROWSER_FRIENDLY_EXTS = frozenset((".mp4", ".m4v", ".mov"))
+
 
 def _pick_video_file(files: list[dict]) -> dict | None:
     """
@@ -54,9 +58,13 @@ def _pick_video_file(files: list[dict]) -> dict | None:
 
     Strategy:
     1. Keep only files whose name ends with a known video extension.
-    2. Among those, return the one with the largest reported size.
-    3. If no file has a recognised extension, fall back to the largest file overall.
-    4. If the list is empty, return None.
+    2. Among those, prefer browser-friendly formats (MP4/M4V/MOV) over MKV/AVI
+       because browsers typically support AAC audio in MP4 containers, whereas
+       MKV files often carry AC3/DTS audio tracks that browsers cannot decode.
+    3. Within each group, return the file with the largest reported size
+       (largest = highest quality / main feature).
+    4. If no file has a recognised extension, fall back to the largest file overall.
+    5. If the list is empty, return None.
     """
     if not files:
         return None
@@ -65,7 +73,14 @@ def _pick_video_file(files: list[dict]) -> dict | None:
         if any((f.get("name") or f.get("short_name") or "").lower().endswith(ext) for ext in _VIDEO_EXTS)
     ]
     candidates = video_files if video_files else files
-    return max(candidates, key=lambda f: int(f.get("size", 0) or 0), default=None)
+    # Prefer MP4/M4V/MOV for better browser audio codec compatibility
+    browser_friendly = [
+        f for f in candidates
+        if any((f.get("name") or f.get("short_name") or "").lower().endswith(ext)
+               for ext in _BROWSER_FRIENDLY_EXTS)
+    ]
+    best_pool = browser_friendly if browser_friendly else candidates
+    return max(best_pool, key=lambda f: int(f.get("size", 0) or 0), default=None)
 
 
 def _magnet_hash(magnet: str) -> str:

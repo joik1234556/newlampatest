@@ -62,6 +62,7 @@ class StreamStatusResponse(BaseModel):
     state: str
     progress: float
     direct_url: Optional[str] = None
+    proxy_url: Optional[str] = None  # relative path to /stream/proxy on our server (CORS-safe)
     message: str = ""
 
 

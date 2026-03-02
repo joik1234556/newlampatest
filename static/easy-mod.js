@@ -218,7 +218,6 @@
             var item = { title: title, url: url };
             if (poster) { item.poster = poster; }
             Lampa.Player.play(item);
-            try { Lampa.Player.playlist([item]); } catch(pe) {}
         } catch (e) { log('play error', e.message); }
     }
 
@@ -772,7 +771,8 @@
 
                 // Cache hit — instant play
                 if (status === 'ready' && resp.direct_url) {
-                    playDirect(resp.direct_url, m);
+                    var playUrl = resp.proxy_url ? (API + resp.proxy_url) : resp.direct_url;
+                    playDirect(playUrl, m);
                     return;
                 }
                 if (!jobId) {
@@ -904,9 +904,11 @@
                 if (state === 'ready' && resp.direct_url) {
                     self._dead = 'playing';
                     clearTimeout(self._timer);
+                    // Prefer proxy URL so audio is always served from our CORS-enabled server
+                    var playUrl = resp.proxy_url ? (API + resp.proxy_url) : resp.direct_url;
                     // Check if this torrent has multiple video files (whole-season pack)
                     // If so, show a file picker before playing
-                    self._maybeShowFilePicker(resp.direct_url, self._jobId);
+                    self._maybeShowFilePicker(playUrl, self._jobId);
                     return;
                 }
                 if (state === 'failed') {
@@ -969,16 +971,9 @@
                     item.append(jq('<span class="em-file-size">').text(fmtSize(f.size_mb)));
                 }
                 item.on('hover:enter click', function () {
-                    // Request direct link for the chosen file
-                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(f.file_id) }, function (resp) {
-                        if (resp && resp.direct_url) {
-                            playDirect(resp.direct_url, m);
-                        } else {
-                            playDirect(defaultUrl, m);
-                        }
-                    }, function () {
-                        playDirect(defaultUrl, m);
-                    });
+                    // Use proxy_file endpoint so audio is served from our CORS-enabled server
+                    var fileProxyUrl = API + '/stream/proxy_file?job_id=' + encodeURIComponent(jobId) + '&file_id=' + encodeURIComponent(String(f.file_id));
+                    playDirect(fileProxyUrl, m);
                 });
                 listEl.append(item);
             })(files[fi]);

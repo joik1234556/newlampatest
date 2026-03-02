@@ -361,6 +361,137 @@ class TestStreamStatus:
         assert body["state"] == "ready"
         assert body["direct_url"] == "https://cdn.torbox.app/ready.mkv"
 
+    def test_status_ready_includes_proxy_url(self, client):
+        """When job is ready, /stream/status must include proxy_url pointing to /stream/proxy."""
+        from app.cache import direct_url_cache
+        direct_url_cache.set(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "https://cdn.torbox.app/ready_proxy.mkv",
+        )
+        start_resp = client.post(
+            "/stream/start",
+            json={"variant_id": "v_proxy", "magnet": DEMO_MAGNET, "title": "ProxyTest"},
+        )
+        job_id = start_resp.json()["job_id"]
+        status_resp = client.get(f"/stream/status?job_id={job_id}")
+        body = status_resp.json()
+        assert body["state"] == "ready"
+        assert body.get("proxy_url"), "proxy_url must be present when job is ready"
+        assert body["proxy_url"] == f"/stream/proxy?job_id={job_id}"
+
+    def test_stream_start_cache_hit_includes_proxy_url(self, client):
+        """Cache-hit /stream/start response must include proxy_url."""
+        from app.cache import direct_url_cache
+        import hashlib
+        mhash = hashlib.sha1(DEMO_MAGNET.encode()).hexdigest()
+        direct_url_cache.set(mhash, "https://cdn.torbox.app/cached.mkv")
+        resp = client.post(
+            "/stream/start",
+            json={"variant_id": "v_cache_proxy", "magnet": DEMO_MAGNET, "title": "CacheProxyTest"},
+        )
+        body = resp.json()
+        assert body.get("status") == "ready"
+        assert body.get("proxy_url"), "proxy_url must be present on cache-hit start"
+        assert "/stream/proxy?job_id=" in body["proxy_url"]
+
+
+# ---------------------------------------------------------------------------
+# /stream/proxy
+# ---------------------------------------------------------------------------
+
+class TestStreamProxy:
+    def test_proxy_missing_job_id(self, client):
+        resp = client.get("/stream/proxy")
+        assert resp.status_code == 422
+
+    def test_proxy_unknown_job(self, client):
+        resp = client.get("/stream/proxy?job_id=nonexistent-job")
+        assert resp.status_code == 404
+
+    def test_proxy_rejects_non_torbox_domain(self, client):
+        """Proxy must reject job URLs not pointing to a TorBox CDN domain (SSRF guard)."""
+        from app.cache import job_cache
+        from app.models import StreamJob
+        bad_job = StreamJob(
+            variant_id="v_bad",
+            magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            state="ready",
+            direct_url="https://evil.example.com/hack.mp4",
+        )
+        job_cache.set(bad_job.job_id, bad_job.model_dump())
+        resp = client.get(f"/stream/proxy?job_id={bad_job.job_id}")
+        assert resp.status_code == 403
+
+    def test_proxy_no_direct_url_returns_409(self, client):
+        """Proxy must return 409 when the job exists but has no direct_url yet."""
+        from app.cache import job_cache
+        from app.models import StreamJob
+        pending_job = StreamJob(
+            variant_id="v_pending",
+            magnet="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            state="preparing",
+            direct_url=None,
+        )
+        job_cache.set(pending_job.job_id, pending_job.model_dump())
+        resp = client.get(f"/stream/proxy?job_id={pending_job.job_id}")
+        assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# _pick_video_file — MP4 preference
+# ---------------------------------------------------------------------------
+
+class TestPickVideoFile:
+    def test_prefers_mp4_over_mkv(self):
+        """_pick_video_file should prefer an MP4 file over an equally-sized MKV."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "movie.mkv", "size": 4_000_000_000},
+            {"id": 2, "name": "movie.mp4", "size": 3_900_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 2, "MP4 should be preferred over MKV"
+
+    def test_returns_largest_mp4_when_multiple(self):
+        """When multiple MP4 files exist, return the largest one."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "sample.mp4", "size": 100_000_000},
+            {"id": 2, "name": "movie.mp4", "size": 3_500_000_000},
+            {"id": 3, "name": "extras.mp4", "size": 200_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 2
+
+    def test_falls_back_to_mkv_when_no_mp4(self):
+        """When no MP4 exists, return the largest video file regardless of format."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "movie.mkv", "size": 5_000_000_000},
+            {"id": 2, "name": "extras.avi", "size": 200_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 1, "Should fall back to largest file when no MP4"
+
+    def test_falls_back_to_largest_when_no_video_ext(self):
+        """When no file has a recognised video extension, return the largest file."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "readme.txt", "size": 1_000},
+            {"id": 2, "name": "nfo.nfo", "size": 500},
+            {"id": 3, "name": "unknown_binary", "size": 2_000_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 3, "Should return largest file when no video extensions match"
+
+    def test_returns_none_for_empty_list(self):
+        from app.services.stream import _pick_video_file
+        assert _pick_video_file([]) is None
+
 
 # ---------------------------------------------------------------------------
 # Cache unit tests

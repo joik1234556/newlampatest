@@ -2,12 +2,16 @@
 POST /stream/start  — create a streaming job
 GET  /stream/status — poll job status
 GET  /stream/files  — list video files in a ready torrent (episode picker)
+GET  /stream/proxy  — CORS-safe proxy for TorBox direct URLs
 """
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 
 from app.limiter_shared import limiter
 from app.models import StreamJob, StreamStartRequest, StreamStatusResponse, TorrentFilesResponse, TorrentFileItem
@@ -16,6 +20,9 @@ import app.torbox as torbox
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stream", tags=["stream"])
+
+# Domains we are allowed to proxy (TorBox CDN)
+_ALLOWED_PROXY_DOMAINS = (".torbox.app", ".torbox.io", ".torbox.net")
 
 
 @router.post("/start", response_model=dict)
@@ -49,6 +56,7 @@ async def stream_start(
     response: dict = {"job_id": job.job_id, "status": job.state}
     if job.state == "ready" and job.direct_url:
         response["direct_url"] = job.direct_url
+        response["proxy_url"] = f"/stream/proxy?job_id={job.job_id}"
     return response
 
 
@@ -74,6 +82,11 @@ async def stream_status(
         state=job.state,
         progress=job.progress,
         direct_url=job.direct_url,
+        proxy_url=(
+            f"/stream/proxy?job_id={job.job_id}"
+            if job.state == "ready" and job.direct_url
+            else None
+        ),
         message=job.message,
     )
 
@@ -184,3 +197,136 @@ async def stream_play_file(
         raise HTTPException(status_code=404, detail="TorBox returned no URL for this file")
 
     return {"direct_url": direct_url, "job_id": job_id.strip(), "file_id": file_id.strip()}
+
+
+# ---------------------------------------------------------------------------
+# /stream/proxy — CORS-safe streaming proxy for TorBox direct URLs
+# ---------------------------------------------------------------------------
+
+def _is_allowed_proxy_url(url: str) -> bool:
+    """Return True when *url* points to a TorBox CDN domain (SSRF guard)."""
+    hostname = (urlparse(url).hostname or "").lower()
+    return any(hostname.endswith(d) for d in _ALLOWED_PROXY_DOMAINS)
+
+
+async def _proxy_url(request: Request, url: str) -> StreamingResponse:
+    """
+    Stream *url* through our server so the browser receives the content from
+    our origin (which already has ``Access-Control-Allow-Origin: *`` via
+    CORSMiddleware).  Supports ``Range`` requests so the video player can seek.
+
+    Each call creates its own AsyncClient.  The inner generator's ``finally``
+    block guarantees the client is closed regardless of whether the response
+    is fully consumed or the browser disconnects mid-stream.
+    """
+    upstream_headers: dict[str, str] = {}
+    if "range" in request.headers:
+        upstream_headers["Range"] = request.headers["range"]
+
+    # Start the upstream request in streaming mode (does NOT buffer the body).
+    # We use send(stream=True) so we can read response headers before yielding
+    # the body — context-manager .stream() would require nesting inside the
+    # generator which makes header access awkward.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=15.0))
+    try:
+        resp = await client.send(
+            httpx.Request("GET", url, headers=upstream_headers),
+            stream=True,
+            follow_redirects=True,
+        )
+    except Exception as exc:
+        await client.aclose()
+        logger.error("[proxy] upstream request error url=%.80s: %s", url, exc)
+        raise HTTPException(status_code=502, detail=f"Upstream error: {exc}") from exc
+
+    # Collect response headers to forward (skip hop-by-hop headers)
+    resp_headers: dict[str, str] = {"Accept-Ranges": "bytes"}
+    for h in ("Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag"):
+        val = resp.headers.get(h.lower())
+        if val:
+            resp_headers[h] = val
+
+    async def _iter_body():
+        # Both resp and client are captured from the enclosing scope.
+        # finally runs whether the generator is fully consumed or abandoned.
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=65_536):
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _iter_body(),
+        status_code=resp.status_code,
+        headers=resp_headers,
+        media_type=resp.headers.get("content-type", "video/mp4"),
+    )
+
+
+@router.get("/proxy")
+@limiter.limit("60/minute")
+async def stream_proxy(
+    request: Request,
+    job_id: str = Query(..., description="Job ID from /stream/start"),
+) -> StreamingResponse:
+    """
+    CORS-safe streaming proxy for a job's TorBox direct_url.
+
+    Routes the video bytes through our server so browsers always receive
+    ``Access-Control-Allow-Origin: *`` regardless of TorBox CDN settings.
+    Supports ``Range`` requests so the video player can seek.
+    """
+    if not job_id.strip():
+        raise HTTPException(status_code=400, detail="job_id must not be empty")
+
+    job = stream_svc.get_job(job_id.strip())
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if not job.direct_url:
+        raise HTTPException(status_code=409, detail="No direct URL available for this job yet")
+
+    if not _is_allowed_proxy_url(job.direct_url):
+        logger.warning("[proxy] rejected non-TorBox domain: %s", urlparse(job.direct_url).hostname)
+        raise HTTPException(status_code=403, detail="URL domain not allowed for proxying")
+
+    return await _proxy_url(request, job.direct_url)
+
+
+@router.get("/proxy_file")
+@limiter.limit("60/minute")
+async def stream_proxy_file(
+    request: Request,
+    job_id: str = Query(..., description="Job ID from /stream/start"),
+    file_id: str = Query(..., description="File ID from /stream/files"),
+) -> StreamingResponse:
+    """
+    CORS-safe streaming proxy for a specific file inside a TorBox torrent.
+    Fetches a fresh TorBox requestdl URL for the given file, then streams it
+    through our server with proper CORS headers.
+    """
+    if not job_id.strip():
+        raise HTTPException(status_code=400, detail="job_id must not be empty")
+    if not file_id.strip():
+        raise HTTPException(status_code=400, detail="file_id must not be empty")
+
+    job = stream_svc.get_job(job_id.strip())
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if not job.torrent_id:
+        raise HTTPException(status_code=409, detail="Torrent not yet assigned to this job")
+
+    try:
+        direct_url = await torbox.request_download_link(job.torrent_id, file_id.strip())
+    except Exception as exc:
+        logger.error("[proxy_file] TorBox requestdl error: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if not direct_url:
+        raise HTTPException(status_code=404, detail="TorBox returned no URL for this file")
+
+    if not _is_allowed_proxy_url(direct_url):
+        logger.warning("[proxy_file] rejected non-TorBox domain: %s", urlparse(direct_url).hostname)
+        raise HTTPException(status_code=403, detail="URL domain not allowed for proxying")
+
+    return await _proxy_url(request, direct_url)

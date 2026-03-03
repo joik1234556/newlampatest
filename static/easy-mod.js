@@ -555,7 +555,7 @@
         var wrap = jq('<div class="em-source-tabs">');
         var defs = [
             { key: 'all',    label: '\u0412\u0441\u0435',  type: '' },
-            { key: 'torbox', label: 'TorBox',    type: 'torrent' },
+            { key: 'torbox', label: 'Easy-Mod',  type: 'torrent' },
             { key: 'rezka',  label: 'HDRezka',   type: 'online' },
         ];
         for (var i = 0; i < defs.length; i++) {
@@ -805,7 +805,7 @@
                 self._filterQuality = '';
                 self._filterLang    = '';
                 if (torboxFastPath) {
-                    try { Lampa.Noty.show('\u26a1 \u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u0438\u0437 \u043a\u044d\u0448\u0430 TorBox \u2014 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a!'); } catch (e) {}
+                    try { Lampa.Noty.show('\u26a1 \u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u0438\u0437 \u043a\u044d\u0448\u0430 Easy-Mod \u2014 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a!'); } catch (e) {}
                 }
                 self._renderVariants();
             } catch (e) {

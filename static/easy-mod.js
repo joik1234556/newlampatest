@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '6.0';
+    var VERSION = '6.1';
     var API = 'http://46.225.222.255:8000';
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -81,6 +81,10 @@
         ".view--easy_mod .em-spin{display:inline-block;vertical-align:middle;margin-right:.3em}",
         ".view--easy_mod span{display:inline-block;vertical-align:middle}",
         ".view--easy_mod.focus{-webkit-transform:scale(1.02);transform:scale(1.02)}",
+        // HDRezka Online button
+        ".view--hdrezka_online .em-spin{display:inline-block;vertical-align:middle;margin-right:.3em}",
+        ".view--hdrezka_online span{display:inline-block;vertical-align:middle}",
+        ".view--hdrezka_online.focus{-webkit-transform:scale(1.02);transform:scale(1.02)}",
         // Filter bar
         ".em-filters{display:-webkit-box;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;gap:.45em;padding:.3em 0 1.1em;-webkit-box-align:center;align-items:center}",
         ".em-filter-group{display:-webkit-box;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;gap:.4em;-webkit-box-align:center;align-items:center;margin-right:.8em}",
@@ -591,7 +595,7 @@
         this._filterQuality = '';
         this._filterLang    = '';
         this._filterSource  = '';  // '' = all; 'rezka'|'kinogo'|'videocdn'|'kodik' = online source; 'torrent' = Easy-Mod
-        this._activeSource  = 'all'; // 'all' | 'torbox' | 'rezka' — pre-selected source (shown upfront)
+        this._activeSource  = (object && object.activeSource) ? object.activeSource : 'all'; // 'all' | 'torbox' | 'rezka' — pre-selected source (shown upfront)
         this._filterSeason  = 0;   // 0 = no season filter (all seasons)
         this._filterEpisode = 0;   // 0 = no episode filter
         this._isSeries      = false;
@@ -1485,6 +1489,81 @@
     }
 
     // ==================================================================
+    // HDRezka Online button — dedicated button that opens HDRezka streams
+    // directly, pre-selecting the HDRezka source (online_mod.js integration)
+    // ==================================================================
+    var REZKA_ICO = '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>';
+
+    function injectHDRezkaButton() {
+        var root = getActivityRoot();
+        if (!root || !root.find) { return false; }
+
+        // Remove stale button
+        root.find('.view--hdrezka_online').remove();
+
+        // Find button container
+        var container = root.find('.full-start-new__buttons').first();
+        if (!container.length) { container = root.find('.full-start__buttons').first(); }
+        if (!container.length) { return false; }
+
+        // Resolve movie
+        var m = {};
+        try {
+            var act = Lampa.Activity.active();
+            m = (act && (act.movie || act.card || act.data)) || {};
+        } catch (ex) {}
+
+        var btn = jq('<div class="full-start__button selector view--hdrezka_online">')
+            .append(jq(REZKA_ICO))
+            .append(jq('<span>').text('HDRezka'));
+
+        btn.on('hover:enter click', function () {
+            btn.html(BTN_SPIN + '<span>\u041f\u043e\u0438\u0441\u043a\u2026</span>');
+
+            var movie = {};
+            try {
+                var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+                movie = (act && (act.movie || act.card || act.data)) || {};
+            } catch (ex) {}
+            if (!movie.title && !movie.name && !movie.id) { movie = m; }
+
+            log('open HDRezka for', (movie && (movie.title || movie.name)) || '?');
+
+            setTimeout(function () {
+                try { btn.html(REZKA_ICO + '<span>HDRezka</span>'); } catch (e) {}
+            }, 1500);
+
+            try {
+                Lampa.Activity.push({
+                    component:    'easy_mod_variants',
+                    title:        'HDRezka Online',
+                    movie:        movie,
+                    activeSource: 'rezka',
+                    page:         1,
+                });
+            } catch (err) {
+                log('HDRezka Activity.push error', err.message);
+                try { btn.html(REZKA_ICO + '<span>HDRezka</span>'); } catch (e) {}
+            }
+        });
+
+        // Insert after the Easy-Mod button, or before torrent/play/first button
+        var easyModBtn = root.find('.view--easy_mod').first();
+        var torrentBtn = root.find('.view--torrent').first();
+        var playBtn    = root.find('.button--play').first();
+        var firstBtn   = root.find('.full-start__button').first();
+
+        if (easyModBtn.length)    { easyModBtn.after(btn); }
+        else if (torrentBtn.length) { torrentBtn.before(btn); }
+        else if (playBtn.length)  { playBtn.before(btn); }
+        else if (firstBtn.length) { firstBtn.before(btn); }
+        else                      { container.prepend(btn); }
+
+        log('HDRezka button injected');
+        return true;
+    }
+
+    // ==================================================================
     // Hook film page (modss-style: both 'full' and 'activity' events)
     // ==================================================================
     function hookFilmPage() {
@@ -1494,6 +1573,7 @@
                     if (e && e.type && e.type !== 'complite' && e.type !== 'start') { return; }
                     setTimeout(function () {
                         if (!injectButton()) { setTimeout(injectButton, 300); }
+                        if (!injectHDRezkaButton()) { setTimeout(injectHDRezkaButton, 300); }
                     }, 100);
                 } catch (err) { log('full listener error', err.message); }
             });
@@ -1501,12 +1581,13 @@
             Lampa.Listener.follow('activity', function (e) {
                 try {
                     if (e.component === 'full' && e.type === 'start') {
-                        setTimeout(function () { injectButton(); }, 100);
+                        setTimeout(function () { injectButton(); injectHDRezkaButton(); }, 100);
                     }
                 } catch (err) {}
             });
         } catch (e) { log('hookFilmPage error', e.message); }
     }
+
 
     // ==================================================================
     // Register Lampa components

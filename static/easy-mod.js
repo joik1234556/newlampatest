@@ -5,7 +5,15 @@
     window.__easy_mod_loaded = true;
 
     var VERSION = '6.1';
-    var API = 'http://46.225.222.255:8000';
+    var API_DEFAULT = 'http://46.225.222.255:8000';
+    var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
+
+    function getApi() {
+        try {
+            var stored = Lampa.Storage && Lampa.Storage.field && Lampa.Storage.field('easy_mod_api');
+            return (stored && stored.trim()) ? stored.trim().replace(/\/$/, '') : API_DEFAULT;
+        } catch (e) { return API_DEFAULT; }
+    }
 
     // jQuery alias (Lampa always exposes $ globally)
     var jq = window.jQuery || window.$ || (typeof Lampa !== 'undefined' && Lampa.$) || null;
@@ -210,14 +218,14 @@
     }
 
     function apiGet(path, params, ok, fail) {
-        var url = API + path + qs(params || {});
+        var url = getApi() + path + qs(params || {});
         log('GET', url);
         netGet(url, ok, fail);
     }
 
     function apiPost(path, body, ok, fail) {
-        log('POST', API + path);
-        netPost(API + path, body, ok, fail);
+        log('POST', getApi() + path);
+        netPost(getApi() + path, body, ok, fail);
     }
 
     // -------------------------------------------------------
@@ -1562,6 +1570,54 @@
     }
 
     // ==================================================================
+    // Settings
+    // ==================================================================
+    function addSettingsEasyMod() {
+        try {
+            if (!(Lampa.Settings && Lampa.Settings.main && Lampa.Settings.main())) { return; }
+            if (Lampa.Settings.main().render().find('[data-component="easy_mod"]').length) { return; }
+            var ico = '<svg xmlns="http://www.w3.org/2000/svg" height="57" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+            var field = jq(
+                '<div class="settings-folder selector" data-component="easy_mod">' +
+                '<div class="settings-folder__icon">' + ico + '</div>' +
+                '<div class="settings-folder__name">Easy Mod</div>' +
+                '</div>'
+            );
+            Lampa.Settings.main().render().find('[data-component="more"]').after(field);
+            Lampa.Settings.main().update();
+            log('settings folder added');
+        } catch (e) { log('addSettingsEasyMod error', e.message); }
+    }
+
+    function initSettings() {
+        try {
+            var template =
+                '<div>' +
+                '<div class="settings-param selector" data-name="easy_mod_api" data-type="input" placeholder="' + API_DEFAULT + '">' +
+                    '<div class="settings-param__name">API \u0441\u0435\u0440\u0432\u0435\u0440</div>' +
+                    '<div class="settings-param__value"></div>' +
+                    '<div class="settings-param__descr">URL \u0432\u0430\u0448\u0435\u0433\u043e Easy-Mod \u0441\u0435\u0440\u0432\u0435\u0440\u0430</div>' +
+                '</div>' +
+                '<div class="settings-param" data-name="easy_mod_version" data-static="true">' +
+                    '<div class="settings-param__name">\u0412\u0435\u0440\u0441\u0438\u044f Easy Mod</div>' +
+                    '<div class="settings-param__value">' + VERSION + '</div>' +
+                '</div>' +
+                '</div>';
+            Lampa.Template.add('settings_easy_mod', template);
+        } catch (e) { log('Template.add error', e.message); }
+
+        if (window.appready) {
+            addSettingsEasyMod();
+        } else {
+            try {
+                Lampa.Listener.follow('app', function (e) {
+                    if (e.type === 'ready') { addSettingsEasyMod(); }
+                });
+            } catch (e) { setTimeout(addSettingsEasyMod, 2000); }
+        }
+    }
+
+    // ==================================================================
     // Hook film page (modss-style: both 'full' and 'activity' events)
     // ==================================================================
     function hookFilmPage() {
@@ -1609,6 +1665,7 @@
         injectCSS();
         registerComponents();
         hookFilmPage();
+        initSettings();
         log('init done — v' + VERSION);
     }
 

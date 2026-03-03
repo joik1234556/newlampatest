@@ -6,6 +6,7 @@ GET  /stream/proxy  — CORS-safe proxy for TorBox direct URLs
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from urllib.parse import urlparse
@@ -51,7 +52,21 @@ async def stream_start(
         logger.error("[Easy-Mod][/stream/start] error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    response: dict = {"job_id": job.job_id, "status": job.state}
+    # ── Fast-path wait: poll for up to 2 s so instantly-cached torrents
+    # return direct_url in the initial response (no client polling needed).
+    if job.state not in ("ready", "failed"):
+        for _ in range(4):  # 4 × 0.5 s = 2 s max
+            await asyncio.sleep(0.5)
+            updated = await stream_svc.load_job(job.job_id)
+            if updated is None:
+                break
+            job = updated
+            if job.state in ("ready", "failed"):
+                break
+
+    # Normalize intermediate states to "queued" — client only needs ready/queued/failed
+    reported_status = job.state if job.state in ("ready", "failed") else "queued"
+    response: dict = {"job_id": job.job_id, "status": reported_status}
     if job.state == "ready" and job.direct_url:
         response["direct_url"] = job.direct_url
         response["proxy_url"] = f"/stream/proxy?job_id={job.job_id}"

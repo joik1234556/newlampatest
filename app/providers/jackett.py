@@ -311,6 +311,18 @@ def _year_ok(title_r: str, year: Optional[int]) -> bool:
     return any(abs(y - year) <= 1 for y in years_in_title)
 
 
+def _title_or_orig_matches(
+    title: str,
+    original_title: Optional[str],
+    candidate: str,
+    threshold: float = 0.50,
+) -> bool:
+    """Return True if *candidate* matches *title* or *original_title* at *threshold*."""
+    if _title_matches(title, candidate, threshold=threshold):
+        return True
+    return bool(original_title and _title_matches(original_title, candidate, threshold=threshold))
+
+
 class JackettProvider(BaseProvider):
     """Fetch torrent search results from a Jackett instance."""
 
@@ -405,8 +417,17 @@ class JackettProvider(BaseProvider):
         seen_magnets: set,
         variants: list,
         season: Optional[int] = None,
+        title: Optional[str] = None,
+        original_title: Optional[str] = None,
+        year: Optional[int] = None,
     ) -> None:
-        """Execute one ID-based Jackett call and append valid variants (no title matching)."""
+        """Execute one ID-based Jackett call and append valid variants.
+
+        Even for ID-based (imdbid/tmdbid) searches we apply a lenient title
+        check (threshold 0.50) to filter out completely wrong results that some
+        Jackett indexers return when they fall back to internal text search.
+        Year and season filters are also applied.
+        """
         try:
             client = _get_http_client()
             resp = await client.get(url, params=params)
@@ -417,9 +438,23 @@ class JackettProvider(BaseProvider):
                 magnet = r.get("MagnetUri") or ""
                 if not magnet.startswith("magnet:?xt=urn:btih"):
                     continue
-                # For season-scoped queries, still validate the season in the title
                 if season and not self._season_ok(title_r, season):
                     continue
+                # Lenient title check: catches completely wrong films returned by
+                # indexers that don't properly support imdbid/tmdbid lookup.
+                if title:
+                    if not _year_ok(title_r, year):
+                        logger.debug(
+                            "[JackettProvider][ID] skip '%s': year mismatch (want %s)",
+                            title_r, year,
+                        )
+                        continue
+                    if not _title_or_orig_matches(title, original_title, title_r):
+                        logger.debug(
+                            "[JackettProvider][ID] skip '%s': title mismatch (query='%s')",
+                            title_r, title,
+                        )
+                        continue
                 if magnet in seen_magnets:
                     continue
                 seen_magnets.add(magnet)
@@ -501,6 +536,19 @@ class JackettProvider(BaseProvider):
                     continue
                 if season and not self._season_ok(title_r, season):
                     continue
+                # Year + title validation to prevent wrong-film Ukrainian results
+                if not _year_ok(title_r, year):
+                    logger.debug(
+                        "[JackettProvider][UKR] skip '%s': year mismatch (want %s)",
+                        title_r, year,
+                    )
+                    continue
+                if not _title_or_orig_matches(title, original_title, title_r):
+                    logger.debug(
+                        "[JackettProvider][UKR] skip '%s': title mismatch (query='%s')",
+                        title_r, title,
+                    )
+                    continue
                 if magnet in seen_magnets:
                     continue
                 seen_magnets.add(magnet)
@@ -579,7 +627,8 @@ class JackettProvider(BaseProvider):
                     "cat": cat_str,
                 }
                 logger.info("[JackettProvider] movie search imdbid=%s", imdb_norm)
-            await self._id_search(url, id_params, seen_magnets, variants, season=season)
+            await self._id_search(url, id_params, seen_magnets, variants, season=season,
+                                   title=title, original_title=original_title, year=year)
             logger.info("[JackettProvider] ID(imdb) search found %d results for %s", len(variants), imdb_norm)
             # When an exact IMDB ID was used, NEVER fall back to generic text search.
             # However, always run Ukrainian-specific queries so that UA-dubbed packs
@@ -596,7 +645,8 @@ class JackettProvider(BaseProvider):
                 "cat": cat_str,
             }
             logger.info("[JackettProvider] movie search tmdbid=%s", tmdb_id)
-            await self._id_search(url, tmdb_params, seen_magnets, variants, season=None)
+            await self._id_search(url, tmdb_params, seen_magnets, variants, season=None,
+                                   title=title, original_title=original_title, year=year)
             logger.info("[JackettProvider] ID(tmdb) search found %d results for tmdb:%s", len(variants), tmdb_id)
             # Same: exact TMDB ID — never fall back to generic text search.
             # But always run Ukrainian-specific queries.

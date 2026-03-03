@@ -1116,8 +1116,8 @@
         this._timer   = null;
         this._ticks        = 0;
         this._statusErrors = 0;
-        this._FAST_TICKS   = 15;
-        this._FAST_INTERVAL= 2000;
+        this._FAST_TICKS   = 30;
+        this._FAST_INTERVAL= 800;
         this._SLOW_INTERVAL= 5000;
         this._MAX_TICKS    = 75;
     }

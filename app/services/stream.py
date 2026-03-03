@@ -136,6 +136,11 @@ async def _update_job(job_id: str, **kwargs) -> Optional[StreamJob]:
 # Public API
 # ---------------------------------------------------------------------------
 
+async def load_job(job_id: str) -> Optional[StreamJob]:
+    """Async public accessor — used by routers that need the latest job state."""
+    return await _load_job(job_id)
+
+
 def get_job(job_id: str) -> Optional[StreamJob]:
     """Sync accessor used by the status router (via the in-memory mirror)."""
     data = job_cache.get(job_id)

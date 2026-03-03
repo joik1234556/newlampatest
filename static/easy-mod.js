@@ -717,17 +717,30 @@
         if (self._filterSeason)  { params.season  = self._filterSeason; }
         if (self._filterEpisode) { params.episode = self._filterEpisode; }
 
-        apiGet('/variants', params, function (data) {
+        // ── Parallel fetch: /variants (TorBox+online providers) + /hdrezka (HdRezkaApi) ──
+        // Both are fired simultaneously; we wait until both complete before rendering.
+        // If one fails the other's results are still shown.
+        var variantsDone  = false;
+        var hdrezkaDone   = false;
+        var variantsData  = [];
+        var hdrezkaData   = [];
+        var torboxFastPath = false;
+
+        function _mergeAndRender() {
+            if (!variantsDone || !hdrezkaDone) { return; }
             if (self._dead) { return; }
             try {
-                var variants = (data && data.variants && data.variants.length) ? data.variants : [];
-                log('variants loaded N=' + variants.length + (data.source ? ' source=' + data.source : ''));
-                self._allVariants  = variants;
+                // Merge: existing /variants results + fresh HDRezka API variants
+                // HDRezka API variants carry source:'rezka' so they appear in the
+                // "HDRezka" source tab automatically.
+                var all = variantsData.concat(hdrezkaData);
+                log('merged variants N=' + all.length + ' (torrent=' + variantsData.length +
+                    ' hdrezka=' + hdrezkaData.length + ')');
+                self._allVariants  = all;
                 self._filterVoice  = '';
                 self._filterQuality = '';
                 self._filterLang    = '';
-                // Notify user when results came instantly from TorBox global cache
-                if (data.source === 'torbox_direct') {
+                if (torboxFastPath) {
                     try { Lampa.Noty.show('\u26a1 \u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u0438\u0437 \u043a\u044d\u0448\u0430 TorBox \u2014 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a!'); } catch (e) {}
                 }
                 self._renderVariants();
@@ -735,15 +748,67 @@
                 log('variants render error', e.message);
                 self._render.html('<div class="online-empty"><div class="online-empty__title">\u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f</div></div>');
             }
+        }
+
+        // Fetch 1: /variants (TorBox + all online providers via backend)
+        apiGet('/variants', params, function (data) {
+            if (self._dead) { return; }
+            variantsDone = true;
+            variantsData = (data && data.variants && data.variants.length) ? data.variants : [];
+            log('variants loaded N=' + variantsData.length + (data && data.source ? ' source=' + data.source : ''));
+            if (data && data.source === 'torbox_direct') { torboxFastPath = true; }
+            _mergeAndRender();
         }, function (err) {
             if (self._dead) { return; }
             log('variants error', err);
-            self._render.html(
-                '<div class="online-empty" style="padding:2em">' +
-                '<div class="online-empty__title">\u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0430</div>' +
-                '<div class="online-empty__time">' + (err || '\u041d\u0435\u0442 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f') + '</div>' +
-                '</div>'
-            );
+            variantsDone = true;
+            if (!hdrezkaDone) {
+                // Show an intermediate error but keep waiting for HDRezka
+                self._render.empty();
+                self._render.append(jq('<div>').html(loadingHtml('HDRezka\u2026')));
+            }
+            _mergeAndRender();
+        });
+
+        // Fetch 2: /hdrezka (HdRezkaApi library — direct streams)
+        var hdParams = {};
+        if (title) { hdParams.title = title; }
+        if (year)  { hdParams.year  = year; }
+        if (self._filterSeason)  { hdParams.season  = self._filterSeason; }
+        if (self._filterEpisode) { hdParams.episode = self._filterEpisode; }
+
+        apiGet('/hdrezka', hdParams, function (data) {
+            if (self._dead) { return; }
+            hdrezkaDone = true;
+            var files = (data && data.files) ? data.files : [];
+            // Convert file objects to Variant-compatible objects with source='rezka'
+            // so they appear under the "HDRezka" tab in the source selector.
+            hdrezkaData = [];
+            for (var fi = 0; fi < files.length; fi++) {
+                var f = files[fi];
+                if (!f.url) { continue; }
+                hdrezkaData.push({
+                    id:        'hdrezka_api_' + (f.quality || 'unknown'),
+                    label:     'HDRezka \u2022 RU \u2022 ' + (f.quality || '?').toUpperCase() + ' (Online)',
+                    quality:   f.quality   || 'unknown',
+                    url:       f.url,
+                    source:    'rezka',
+                    language:  'ru',
+                    voice:     '',
+                    is_cached: true,
+                    seeders:   0,
+                    size_mb:   0,
+                    codec:     '',
+                    magnet:    ''
+                });
+            }
+            log('hdrezka loaded N=' + hdrezkaData.length);
+            _mergeAndRender();
+        }, function (err) {
+            if (self._dead) { return; }
+            log('hdrezka error (non-fatal)', err);
+            hdrezkaDone = true;
+            _mergeAndRender();
         });
     };
 

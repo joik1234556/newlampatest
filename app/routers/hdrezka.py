@@ -34,12 +34,47 @@ _MEM_CACHE: dict[str, dict] = {}
 _CACHE_TTL: int = 1800  # 30 minutes
 
 
-def _cache_key(title: str, year: Optional[int], season: Optional[int], episode: Optional[int]) -> str:
-    raw = f"{title.lower().strip()}:{year or ''}:{season or ''}:{episode or ''}"
+def _cache_key(
+    title: str,
+    year: Optional[int],
+    season: Optional[int],
+    episode: Optional[int],
+    translator_id: Optional[int] = None,
+) -> str:
+    raw = f"{title.lower().strip()}:{year or ''}:{season or ''}:{episode or ''}:{translator_id or ''}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def _get_streams_sync(page_url: str, season: Optional[int], episode: Optional[int]) -> list[dict]:
+
+def _get_translators_sync(page_url: str) -> list[dict]:
+    """Return available translators/voices for the given HDRezka page URL."""
+    try:
+        from HdRezkaApi import HdRezkaApi  # type: ignore[import]
+    except ImportError:
+        return []
+    try:
+        api = HdRezkaApi(page_url)
+        if not api.ok:
+            return []
+        translators = api.translators  # {id: {"name": str, "premium": bool}}
+        if not isinstance(translators, dict):
+            return []
+        return [
+            {"id": tr_id, "name": str(tr_val.get("name", tr_id)), "premium": bool(tr_val.get("premium", False))}
+            for tr_id, tr_val in translators.items()
+            if isinstance(tr_val, dict)
+        ]
+    except Exception as exc:
+        logger.warning("[HDRezka] translators error url=%s: %s", page_url, exc)
+        return []
+
+
+def _get_streams_sync(
+    page_url: str,
+    season: Optional[int],
+    episode: Optional[int],
+    translator_id: Optional[int] = None,
+) -> list[dict]:
     """Call HdRezkaApi synchronously (runs in threadpool executor so asyncio is not blocked)."""
     try:
         from HdRezkaApi import HdRezkaApi  # type: ignore[import]
@@ -56,10 +91,12 @@ def _get_streams_sync(page_url: str, season: Optional[int], episode: Optional[in
             logger.warning("[HDRezka] api.ok=False url=%s exc=%s", page_url, getattr(api, "exception", ""))
             return []
 
+        # Pass translator_id (voice) when provided
+        tr = translator_id  # int or None
         if season is not None and episode is not None:
-            stream = api.getStream(season=season, episode=episode)
+            stream = api.getStream(season=season, episode=episode, translation=tr)
         else:
-            stream = api.getStream()
+            stream = api.getStream(translation=tr)
 
         files: list[dict] = []
         for quality in ("2160p", "1080p", "720p", "480p", "360p"):
@@ -70,11 +107,58 @@ def _get_streams_sync(page_url: str, season: Optional[int], episode: Optional[in
                     files.append({"quality": quality, "url": str(urls[0])})
             except Exception:
                 pass
-        logger.info("[HDRezka] found %d stream(s) for url=%s", len(files), page_url)
+        logger.info("[HDRezka] found %d stream(s) for url=%s tr=%s", len(files), page_url, tr)
         return files
     except Exception as exc:
         logger.warning("[HDRezka] getStream error url=%s: %s", page_url, exc)
         return []
+
+
+@router.get("/hdrezka/info")
+@limiter.limit(RATE_LIMIT)
+async def hdrezka_info(
+    request: Request,
+    title: str = Query(..., description="Film or series title to search for on HDRezka"),
+    year: Optional[int] = Query(None, description="Release year (improves match accuracy)"),
+    url: Optional[str] = Query(None, description="Direct HDRezka page URL — skips the search step"),
+) -> dict:
+    """
+    Return available translators/voices for a title on HDRezka.
+
+    Returns ``{ title, url, translators: [{id, name, premium}] }``.
+    Use the returned ``url`` and a ``translator_id`` from this response when
+    calling ``/hdrezka`` to get streams for a specific voice.
+    """
+    key = "info:" + _cache_key(title, year, None, None)
+    entry = _MEM_CACHE.get(key)
+    if entry and time.time() - entry["ts"] < _CACHE_TTL:
+        return entry["data"]
+
+    page_url = url
+    if not page_url:
+        try:
+            results = await _rezka_scraper.search(title)
+        except Exception as exc:
+            logger.error("[HDRezka][info] search error title=%s: %s", title, exc)
+            results = []
+        if not results:
+            return {"title": title, "url": None, "translators": []}
+        page_url = results[0]["url"]
+        if year:
+            for r in results:
+                try:
+                    r_year = int(r.get("year") or 0)
+                except (ValueError, TypeError):
+                    r_year = 0
+                if r_year and abs(r_year - year) <= 1:
+                    page_url = r["url"]
+                    break
+
+    loop = asyncio.get_event_loop()
+    translators = await loop.run_in_executor(None, _get_translators_sync, page_url)
+    result: dict = {"title": title, "url": page_url, "translators": translators}
+    _MEM_CACHE[key] = {"data": result, "ts": time.time()}
+    return result
 
 
 @router.get("/hdrezka")
@@ -86,20 +170,22 @@ async def hdrezka_streams(
     season: Optional[int] = Query(None, description="Season number for TV series (1-based)"),
     episode: Optional[int] = Query(None, description="Episode number for TV series (1-based)"),
     url: Optional[str] = Query(None, description="Direct HDRezka page URL — skips the search step"),
+    translator_id: Optional[int] = Query(None, description="Translator/voice ID from /hdrezka/info"),
 ) -> dict:
     """
     Return direct video streams (m3u8/mp4) for a film/series from HDRezka via HdRezkaApi.
 
     - If ``url`` is provided it is used directly (no search).
     - Otherwise searches HDRezka for ``title`` (filtered by ``year`` if given).
+    - Pass ``translator_id`` (from ``/hdrezka/info``) to select a specific voice/dubbing.
 
     Returns ``{ title, url, files: [{quality, url}] }``.
     Each file entry: ``quality`` (e.g. ``"1080p"``) and ``url`` (direct playback link).
     """
-    key = _cache_key(title, year, season, episode)
+    key = _cache_key(title, year, season, episode, translator_id)
     entry = _MEM_CACHE.get(key)
     if entry and time.time() - entry["ts"] < _CACHE_TTL:
-        logger.info("[HDRezka] cache hit title=%s season=%s ep=%s", title, season, episode)
+        logger.info("[HDRezka] cache hit title=%s season=%s ep=%s tr=%s", title, season, episode, translator_id)
         return entry["data"]
 
     # ── Step 1: Resolve HDRezka page URL ─────────────────────────────────
@@ -127,11 +213,11 @@ async def hdrezka_streams(
                     page_url = r["url"]
                     break
 
-    logger.info("[HDRezka] fetching streams url=%s season=%s ep=%s", page_url, season, episode)
+    logger.info("[HDRezka] fetching streams url=%s season=%s ep=%s tr=%s", page_url, season, episode, translator_id)
 
     # ── Step 2: Get streams via HdRezkaApi (sync → threadpool) ───────────
     loop = asyncio.get_event_loop()
-    files = await loop.run_in_executor(None, _get_streams_sync, page_url, season, episode)
+    files = await loop.run_in_executor(None, _get_streams_sync, page_url, season, episode, translator_id)
 
     result: dict = {"title": title, "url": page_url, "files": files}
     if not files:

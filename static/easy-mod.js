@@ -601,7 +601,18 @@
         this._isSeries      = false;
         this._seriesSeasons = [];
         this._episodeCounts = {};  // season_number → episode_count
+        // HDRezka translator selection
+        this._rezkaTranslators  = [];   // [{id, name, premium}] — fetched from /hdrezka/info
+        this._rezkaUrl          = '';   // resolved HDRezka page URL (reused across translator switches)
+        this._rezkaTranslatorId = 0;    // currently selected translator id (0 = default)
     }
+
+    // Reset HDRezka translator state (called when switching away from the rezka source)
+    EasyModVariants.prototype._resetRezkaState = function () {
+        this._rezkaTranslators  = [];
+        this._rezkaUrl          = '';
+        this._rezkaTranslatorId = 0;
+    };
 
     EasyModVariants.prototype.create = function () { return this._render; };
     EasyModVariants.prototype.render = function () { return this._render; };
@@ -721,6 +732,8 @@
             self._filterVoice   = '';
             self._filterQuality = '';
             self._filterLang    = '';
+            // Reset HDRezka translator state when switching sources
+            if (key !== 'rezka') { self._resetRezkaState(); }
             self._fetchVariants();
         });
         self._render.append(srcSel);
@@ -819,23 +832,57 @@
             if (year)  { hdParams.year  = year; }
             if (self._filterSeason)  { hdParams.season  = self._filterSeason; }
             if (self._filterEpisode) { hdParams.episode = self._filterEpisode; }
+            // Reuse the already-resolved HDRezka page URL to avoid a second search
+            if (self._rezkaUrl)          { hdParams.url           = self._rezkaUrl; }
+            if (self._rezkaTranslatorId) { hdParams.translator_id = self._rezkaTranslatorId; }
+
+            // Fetch translator info in parallel the first time we access HDRezka for this title
+            var needTranslatorFetch = (self._rezkaTranslators.length === 0 && !self._rezkaUrl);
+            if (needTranslatorFetch) {
+                var infoParams = {};
+                if (title) { infoParams.title = title; }
+                if (year)  { infoParams.year  = year; }
+                apiGet('/hdrezka/info', infoParams, function (info) {
+                    if (self._dead) { return; }
+                    if (info && info.url)          { self._rezkaUrl         = info.url; }
+                    if (info && info.translators)  { self._rezkaTranslators = info.translators || []; }
+                    log('hdrezka info: url=' + self._rezkaUrl + ' translators=' + self._rezkaTranslators.length);
+                }, function () {
+                    // info endpoint is optional — ignore errors
+                });
+            }
 
             apiGet('/hdrezka', hdParams, function (data) {
                 if (self._dead) { return; }
                 hdrezkaDone = true;
+                // Cache the resolved page URL for subsequent translator switches
+                if (data && data.url && !self._rezkaUrl) { self._rezkaUrl = data.url; }
                 var files = (data && data.files) ? data.files : [];
                 hdrezkaData = [];
+                // Determine the active translator label for the variant label
+                var activeTranslator = self._rezkaTranslatorId
+                    ? (function () {
+                        for (var ti = 0; ti < self._rezkaTranslators.length; ti++) {
+                            if (self._rezkaTranslators[ti].id === self._rezkaTranslatorId) {
+                                return self._rezkaTranslators[ti].name;
+                            }
+                        }
+                        return '';
+                    }())
+                    : '';
                 for (var fi = 0; fi < files.length; fi++) {
                     var f = files[fi];
                     if (!f.url) { continue; }
+                    var voiceLabel = activeTranslator || 'RU';
+                    var trSuffix = self._rezkaTranslatorId ? '_' + self._rezkaTranslatorId : '';
                     hdrezkaData.push({
-                        id:        'hdrezka_api_' + (f.quality || 'unknown'),
-                        label:     'HDRezka \u2022 RU \u2022 ' + (f.quality || '?').toUpperCase() + ' (Online)',
+                        id:        'hdrezka_api_' + (f.quality || 'unknown') + trSuffix,
+                        label:     'HDRezka \u2022 ' + voiceLabel + ' \u2022 ' + (f.quality || '?').toUpperCase() + ' (Online)',
                         quality:   f.quality   || 'unknown',
                         url:       f.url,
                         source:    'rezka',
                         language:  'ru',
-                        voice:     '',
+                        voice:     voiceLabel,
                         is_cached: true,
                         seeders:   0,
                         size_mb:   0,
@@ -953,9 +1000,39 @@
             self._filterVoice   = '';
             self._filterQuality = '';
             self._filterLang    = '';
+            if (key !== 'rezka') { self._resetRezkaState(); }
             self._fetchVariants();
         });
         self._render.append(srcSel2);
+
+        // 1b. HDRezka translator/voice selector — shown when rezka source is active
+        //     and we have more than one translator available.
+        if ((self._activeSource === 'rezka' || self._activeSource === 'all') &&
+            self._rezkaTranslators && self._rezkaTranslators.length > 1) {
+            var trBar = jq('<div class="em-source-tabs" style="margin-top:.5em">');
+            trBar.append(
+                jq('<span style="font-size:.85em;opacity:.7;margin-right:.5em;align-self:center">')
+                    .text('\u0413\u043e\u043b\u043e\u0441:')  // "Голос:"
+            );
+            for (var tri = 0; tri < self._rezkaTranslators.length; tri++) {
+                (function (tr) {
+                    var tbtn = jq('<div class="em-filter-btn selector">')
+                        .text(tr.name + (tr.premium ? ' \u2605' : ''));
+                    if (self._rezkaTranslatorId === tr.id) { tbtn.addClass('active'); }
+                    tbtn.on('hover:enter click', function () {
+                        if (self._rezkaTranslatorId === tr.id) { return; }
+                        self._rezkaTranslatorId = tr.id;
+                        self._allVariants   = [];
+                        self._filterVoice   = '';
+                        self._filterQuality = '';
+                        self._filterLang    = '';
+                        self._fetchVariants();
+                    });
+                    trBar.append(tbtn);
+                })(self._rezkaTranslators[tri]);
+            }
+            self._render.append(trBar);
+        }
 
         // 2. Filter bar (season/episode/quality/voice/lang) FLAT — NOT inside scroll.
         // This fixes the TV-remote navigation bug where season/episode buttons were

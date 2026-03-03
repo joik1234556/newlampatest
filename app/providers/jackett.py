@@ -328,6 +328,11 @@ class JackettProvider(BaseProvider):
 
     name = "jackett"
 
+    @staticmethod
+    def _is_cyrillic(text: str) -> bool:
+        """Return True when *text* contains at least one Cyrillic letter."""
+        return bool(re.search(r"[а-яёїієА-ЯЁЇІЄ]", text))
+
     def _build_queries(
         self,
         title: str,
@@ -336,7 +341,14 @@ class JackettProvider(BaseProvider):
         season: Optional[int] = None,
         episode: Optional[int] = None,
     ) -> list[str]:
-        """Build ordered list of query strings to try, most specific first."""
+        """Build ordered list of query strings to try, most specific first.
+
+        When the display ``title`` is Cyrillic (Ukrainian/Russian) and
+        ``original_title`` is Latin (English), the Latin title is tried *first*
+        so international Jackett indexers — which don't index Cyrillic titles —
+        are hit with the correct English query.  The Cyrillic title follows as a
+        fallback for CIS-region trackers.
+        """
         seen: set[str] = set()
         queries: list[str] = []
 
@@ -346,38 +358,50 @@ class JackettProvider(BaseProvider):
                 seen.add(key)
                 queries.append(q)
 
+        # Detect Cyrillic-vs-Latin mismatch so we can prioritise the Latin title
+        # for international trackers (they never index Cyrillic titles).
+        _orig_differs = bool(original_title and original_title.lower() != title.lower())
+        _title_is_cyrillic = self._is_cyrillic(title)
+        _orig_is_latin = _orig_differs and not self._is_cyrillic(original_title or "")
+        # When title is Cyrillic AND original_title is Latin, swap primary/secondary
+        # so the Latin (English) query is sent first — better for international indexers.
+        _primary   = original_title if (_title_is_cyrillic and _orig_is_latin) else title
+        _secondary = title          if (_title_is_cyrillic and _orig_is_latin) else original_title
+        # Base for UKR-suffix queries: always prefer the Latin title when available.
+        _latin_base = original_title if _orig_is_latin else _primary
+
         if season and episode:
             # Episode-specific queries: S01E03 format (most specific)
             s2 = f"{season:02d}"
             e2 = f"{episode:02d}"
-            add(f"{title} S{s2}E{e2}")
-            if original_title and original_title.lower() != title.lower():
-                add(f"{original_title} S{s2}E{e2}")
+            add(f"{_primary} S{s2}E{e2}")
+            if _orig_differs:
+                add(f"{_secondary} S{s2}E{e2}")
         elif season:
             # Season-specific queries: Cyrillic + Latin formats
             s2 = f"{season:02d}"
+            add(f"{_primary} S{s2}")
+            # Always add the Cyrillic season format so CIS-region trackers are covered
             add(f"{title} сезон {season}")
-            add(f"{title} S{s2}")
-            if original_title and original_title.lower() != title.lower():
-                add(f"{original_title} S{s2}")
-                add(f"{original_title} Season {season}")
+            add(f"{_primary} Season {season}")
+            if _orig_differs:
+                add(f"{_secondary} S{s2}")
             # Ukrainian suffix variants
-            add(f"{title if not original_title else original_title} S{s2} UKR")
+            add(f"{_latin_base} S{s2} UKR")
         else:
             # Primary: title + year (most specific — avoids picking up unrelated films)
             if year:
-                add(f"{title} {year}")
-                if original_title and original_title.lower() != title.lower():
-                    add(f"{original_title} {year}")
+                add(f"{_primary} {year}")
+                if _orig_differs:
+                    add(f"{_secondary} {year}")
             # Secondary: title alone (catches results that omit the year)
-            add(title)
-            if original_title and original_title.lower() != title.lower():
-                add(original_title)
+            add(_primary)
+            if _orig_differs:
+                add(_secondary)
             # Ukrainian language variants (catches [UA], UKR, Ukrainian dubs)
-            base_for_ua = original_title if (original_title and original_title.lower() != title.lower()) else title
             if year:
-                add(f"{base_for_ua} {year} UKR")
-            add(f"{base_for_ua} UKR")
+                add(f"{_latin_base} {year} UKR")
+            add(f"{_latin_base} UKR")
 
         return queries
 

@@ -1077,6 +1077,7 @@
                         job_id:    jobId,
                         movie:     m,
                         variant:   variant,
+                        season:    self._filterSeason  || 0,
                         episode:   self._filterEpisode || 0,
                     });
                 } catch (e) { log('push wait error', e.message); }
@@ -1111,6 +1112,7 @@
         this._variant = (object && object.variant) || {};
         this._jobId   = (object && object.job_id)  || '';
         this._episode = (object && object.episode) || 0;  // requested episode number (0 = none)
+        this._season  = (object && object.season)  || 0;  // requested season number (0 = none)
         this._render  = jq('<div class="easy-mod-page em-wait" style="padding:2em;min-height:10em">');
         this._dead    = false;
         this._timer   = null;
@@ -1223,7 +1225,8 @@
     EasyModWait.prototype._maybeShowFilePicker = function (defaultUrl, jobId) {
         var self = this;
         var m = self._movie || {};
-        var wantEp = self._episode || 0;
+        var wantEp     = self._episode || 0;
+        var wantSeason = self._season  || 0;
         // Fetch file list from /stream/files
         apiGet('/stream/files', { job_id: jobId }, function (data) {
             if (self._dead && self._dead !== 'picker' && self._dead !== 'playing') { return; }
@@ -1234,24 +1237,8 @@
                 playDirect(defaultUrl, m);
                 return;
             }
-            // When a specific episode was requested, try to auto-match it.
-            // The backend already returns files sorted by episode number ascending.
-            if (wantEp) {
-                var matched = null;
-                for (var i = 0; i < videoFiles.length; i++) {
-                    if (_fileEpNum(videoFiles[i].name) === wantEp) { matched = videoFiles[i]; break; }
-                }
-                if (matched) {
-                    // Auto-play the matched episode — no picker needed
-                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(matched.file_id) }, function (resp) {
-                        if (resp && resp.direct_url) { playDirect(resp.direct_url, m); }
-                        else { playDirect(defaultUrl, m); }
-                    }, function () { playDirect(defaultUrl, m); });
-                    return;
-                }
-            }
-            // Multiple video files — show picker
-            self._showFilePicker(videoFiles, jobId, defaultUrl, m);
+            // _showFilePicker handles episode matching, auto-play and filtered picker display
+            self._showFilePicker(videoFiles, jobId, defaultUrl, m, wantSeason, wantEp);
         }, function () {
             // Error fetching files — fall back to default URL
             playDirect(defaultUrl, m);
@@ -1274,20 +1261,81 @@
         return 0;
     }
 
-    EasyModWait.prototype._showFilePicker = function (files, jobId, defaultUrl, m) {
+    // Extract season number from a filename.
+    function _fileSeasonNum(name) {
+        var basename = (name || '').split(/[\\/]/).pop();
+        // SxxExx or Sxx standalone
+        var m = basename.match(/[Ss](\d{1,2})[Ee]\d{1,3}/);
+        if (m) { return parseInt(m[1], 10); }
+        m = basename.match(/(?:season|сезон)\s*(\d{1,2})/i);
+        if (m) { return parseInt(m[1], 10); }
+        return 0;
+    }
+
+    // Build a human-readable file label: "Сезон N • Серия M" when both are detectable,
+    // "Серия N" when only episode, raw basename otherwise.
+    function _fileLabel(name) {
+        var s = _fileSeasonNum(name);
+        var e = _fileEpNum(name);
+        if (s && e) { return '\u0421\u0435\u0437\u043e\u043d ' + s + ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + e; }
+        if (e)      { return '\u0421\u0435\u0440\u0438\u044f ' + e; }
+        return (name || '').split(/[\\/]/).pop();
+    }
+
+    // wantSeason/wantEp: 0 = no filter; > 0 = pre-filter and auto-play if single match.
+    EasyModWait.prototype._showFilePicker = function (files, jobId, defaultUrl, m, wantSeason, wantEp) {
         var self = this;
+        wantSeason = wantSeason || 0;
+        wantEp     = wantEp     || 0;
+
+        // When a specific episode (and optionally season) is requested, filter the list.
+        // Season filter is applied only when filenames carry season info to avoid
+        // accidentally hiding files from flat torrent packs (e.g. single-season torrents
+        // that don't embed the season number in each filename).
+        var filtered = files;
+        if (wantEp) {
+            var byEp = files.filter(function (f) { return _fileEpNum(f.name) === wantEp; });
+            if (byEp.length > 0) {
+                // Further narrow by season when season info is available in the filenames
+                if (wantSeason) {
+                    var bySeason = byEp.filter(function (f) {
+                        var s = _fileSeasonNum(f.name);
+                        return s === 0 || s === wantSeason;  // 0 = season unknown — keep
+                    });
+                    if (bySeason.length > 0) { byEp = bySeason; }
+                }
+                if (byEp.length === 1) {
+                    // Exactly one match — auto-play without showing the picker
+                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(byEp[0].file_id) }, function (resp) {
+                        if (resp && resp.direct_url) { playDirect(resp.direct_url, m); }
+                        else { playDirect(defaultUrl, m); }
+                    }, function () { playDirect(defaultUrl, m); });
+                    return;
+                }
+                filtered = byEp;
+            }
+            // If no files match the requested episode at all, show all files with a note
+        }
+
         self._render.empty();
         var wrap = jq('<div class="em-wait" style="padding:1em 1.5em">');
-        wrap.append(jq('<div class="em-wait__msg" style="margin-bottom:.7em">').text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0435\u0440\u0438\u044e:'));
+        // Header: contextualise by season+episode when requested
+        var hdr;
+        if (wantSeason && wantEp) {
+            hdr = '\u0421\u0435\u0437\u043e\u043d ' + wantSeason + ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + wantEp + ' \u2014 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0444\u0430\u0439\u043b:';
+        } else if (wantEp) {
+            hdr = '\u0421\u0435\u0440\u0438\u044f ' + wantEp + ' \u2014 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0444\u0430\u0439\u043b:';
+        } else {
+            hdr = '\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0435\u0440\u0438\u044e:';
+        }
+        wrap.append(jq('<div class="em-wait__msg" style="margin-bottom:.7em">').text(hdr));
         var listEl = jq('<div class="em-file-list">');
         // files arrive pre-sorted by episode number ascending from the backend
-        for (var fi = 0; fi < files.length; fi++) {
+        for (var fi = 0; fi < filtered.length; fi++) {
             (function (f) {
                 var item = jq('<div class="em-file-item selector">');
                 var name = f.name || String(f.file_id);
-                // Prefer "Серия N" label when episode number is detectable
-                var epNum = _fileEpNum(name);
-                var label = epNum ? ('\u0421\u0435\u0440\u0438\u044f ' + epNum) : name.split(/[\\/]/).pop();
+                var label = _fileLabel(name);
                 item.append(jq('<span class="em-file-name">').text(label));
                 if (f.quality) {
                     item.append(jq('<span class="em-file-quality">').text(f.quality.toUpperCase()));
@@ -1308,7 +1356,7 @@
                     });
                 });
                 listEl.append(item);
-            })(files[fi]);
+            })(filtered[fi]);
         }
         wrap.append(listEl);
         self._render.append(wrap);

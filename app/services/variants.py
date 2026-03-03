@@ -345,8 +345,13 @@ async def get_variants(
 
     source = "torbox_direct" if torbox_fast_path else None
     response = VariantsResponse(title=title, year=year, variants=final, source=source)
-    # Store as dict so Redis serialisation is straightforward
-    await variants_cache.aset(key, response.model_dump(), ttl=VARIANTS_CACHE_TTL)
+    # Only cache non-empty results.  Caching an empty response would lock out
+    # the user for the full VARIANTS_CACHE_TTL (30 min) even if the underlying
+    # provider failure was transient (e.g. a brief network blip or TorBox key
+    # not yet configured).  The next request will retry all providers and, once
+    # they return results, those will be cached normally.
+    if final:
+        await variants_cache.aset(key, response.model_dump(), ttl=VARIANTS_CACHE_TTL)
     logger.info(
         "[Easy-Mod][Variants] returning %d variants for title=%s season=%s source=%s",
         len(final), title, season, source,

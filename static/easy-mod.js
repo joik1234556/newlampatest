@@ -712,11 +712,22 @@
         // nested in m.external_ids.imdb_id from TMDB enrichment
         var imdb  = m.imdb_id || (m.external_ids && m.external_ids.imdb_id) || '';
 
-        var loadingLabel = title
-            ? '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
+        // Guard: if title cannot be resolved the backend will return 422 and
+        // the user would silently see "nothing found" with no explanation.
+        if (!title) {
+            self._render.html(
+                '<div class="online-empty" style="padding:2em">' +
+                '<div class="online-empty__title">\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0444\u0438\u043b\u044c\u043c\u0430</div>' +
+                '<div class="online-empty__time">\u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0443 \u0444\u0438\u043b\u044c\u043c\u0430 \u0432 Lampa \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435</div>' +
+                '</div>'
+            );
+            try { Lampa.Controller.toggle('content'); } catch (e) {}
+            return;
+        }
+
+        var loadingLabel = '\u041f\u043e\u0438\u0441\u043a \u0434\u043b\u044f \u00ab' + title + '\u00bb' +
               (self._filterSeason ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._filterSeason : '') +
-              (self._filterEpisode ? ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + self._filterEpisode : '') + '\u2026'
-            : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
+              (self._filterEpisode ? ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + self._filterEpisode : '') + '\u2026';
 
         // ── Rebuild UI: source selector + season bar FLAT, then loading spinner ──
         // Destroy any existing scroll first to avoid detached-DOM leaks.
@@ -1045,9 +1056,16 @@
 
         var totalShown = shownOnline.length + shownTorrents.length;
         if (!totalShown) {
+            var emptyMsg = variants.length > 0
+                ? '\u041d\u0435\u0442 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u0444\u0438\u043b\u044c\u0442\u0440\u043e\u0432'
+                : '\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e';
+            var emptyHint = variants.length === 0
+                ? '<div class="online-empty__time">\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0438 API-\u043a\u043b\u044e\u0447\u0438</div>'
+                : '';
             self._render.append(
                 '<div class="online-empty" style="padding:1em 0">' +
-                '<div class="online-empty__title">\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</div>' +
+                '<div class="online-empty__title">' + emptyMsg + '</div>' +
+                emptyHint +
                 '</div>'
             );
             try { Lampa.Controller.toggle('content'); } catch (e) {}

@@ -648,10 +648,37 @@ class TestVariantsService:
         # DemoProvider should have provided fallback variants
         assert len(result.variants) > 0
 
+    def test_empty_variants_not_cached(self):
+        """Empty results must NOT be stored in the cache so the next request
+        retries all providers instead of returning a stale empty list."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.cache import variants_cache
+        from app.services.variants import get_variants
 
-# ---------------------------------------------------------------------------
-# TorrentioProvider unit tests
-# ---------------------------------------------------------------------------
+        unique_title = "EmptyNoCacheTestXYZ9999"
+
+        async def run():
+            with patch("app.services.variants.ENABLE_DEMO_PROVIDER", False), \
+                 patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.jackett.JackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]):
+                result = await get_variants(unique_title)
+            # Result should be empty
+            assert result.variants == []
+            # Cache must NOT contain this key — empty result must not be stored
+            from app.services.variants import _cache_key
+            key = _cache_key(unique_title, None, None)
+            cached = await variants_cache.aget(key)
+            assert cached is None, "Empty variant results must not be written to cache"
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+
+
 
 class TestTorrentioProvider:
     def test_returns_empty_without_tmdb_id(self):

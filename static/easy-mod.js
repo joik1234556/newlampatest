@@ -539,6 +539,34 @@
     }
 
     // -------------------------------------------------------
+    // Source selector row (modss-style: always 3 buttons shown upfront)
+    // Always shows [Все | TorBox | HDRezka], regardless of loaded results.
+    // activeSource: 'all'|'torbox'|'rezka'
+    // -------------------------------------------------------
+    function buildSourceSelector(activeSource, onChange) {
+        var wrap = jq('<div class="em-source-tabs">');
+        var defs = [
+            { key: 'all',    label: '\u0412\u0441\u0435',  type: '' },
+            { key: 'torbox', label: 'TorBox',    type: 'torrent' },
+            { key: 'rezka',  label: 'HDRezka',   type: 'online' },
+        ];
+        for (var i = 0; i < defs.length; i++) {
+            (function (d) {
+                var cls = 'em-filter-btn selector';
+                if (d.type) { cls += ' em-source-tab--' + d.type; }
+                var btn = jq('<div class="' + cls + '">').text(d.label);
+                if (activeSource === d.key) { btn.addClass('active'); }
+                btn.on('hover:enter click', function () {
+                    if (d.key === activeSource) { return; }  // already selected
+                    onChange(d.key);
+                });
+                wrap.append(btn);
+            })(defs[i]);
+        }
+        return wrap;
+    }
+
+    // -------------------------------------------------------
     // Loading state HTML (modss-style spinner)
     // -------------------------------------------------------
     function loadingHtml(subtitle) {
@@ -563,14 +591,12 @@
         this._filterQuality = '';
         this._filterLang    = '';
         this._filterSource  = '';  // '' = all; 'rezka'|'kinogo'|'videocdn'|'kodik' = online source; 'torrent' = Easy-Mod
+        this._activeSource  = 'all'; // 'all' | 'torbox' | 'rezka' — pre-selected source (shown upfront)
         this._filterSeason  = 0;   // 0 = no season filter (all seasons)
         this._filterEpisode = 0;   // 0 = no episode filter
         this._isSeries      = false;
         this._seriesSeasons = [];
         this._episodeCounts = {};  // season_number → episode_count
-        // No persistent sub-containers — everything is rebuilt into _render directly,
-        // placing filter buttons AND variant cards inside a single Lampa.Scroll so that
-        // Android TV remote d-pad navigation can reach all selector elements.
     }
 
     EasyModVariants.prototype.create = function () { return this._render; };
@@ -673,11 +699,29 @@
               (self._filterEpisode ? ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + self._filterEpisode : '') + '\u2026'
             : '\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430\u2026';
 
-        // Rebuild render with filter bar (for season/episode selection) + loading spinner.
-        // We render them flat (not inside Lampa.Scroll) so the spinner is visible immediately
-        // while results are fetched.  _renderVariants will replace all of this with a proper
-        // Lampa.Scroll once the variants arrive.
+        // ── Rebuild UI: source selector + season bar FLAT, then loading spinner ──
+        // Destroy any existing scroll first to avoid detached-DOM leaks.
+        try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) { log('scroll destroy', e.message); }
+        self._scroll = null;
         self._render.empty();
+
+        // 1. Source selector [Все | TorBox | HDRezka] — always visible, even during loading
+        var srcSel = buildSourceSelector(self._activeSource, function (key) {
+            self._activeSource  = key;
+            // Map selector key to result source filter:
+            //   'torbox' → show only torrent variants
+            //   'rezka'  → show only rezka online variants
+            //   'all'    → show all
+            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : '';
+            self._allVariants   = [];
+            self._filterVoice   = '';
+            self._filterQuality = '';
+            self._filterLang    = '';
+            self._fetchVariants();
+        });
+        self._render.append(srcSel);
+
+        // 2. Season/episode bar — shown immediately (not inside scroll) so it's always accessible
         if (self._isSeries && self._seriesSeasons.length > 0) {
             var earlyBar = buildFilters(
                 [], '', '', self._filterSeason, self._seriesSeasons,
@@ -703,25 +747,27 @@
             );
             if (earlyBar) { self._render.append(earlyBar); }
         }
-        self._render.append(jq('<div>').html(loadingHtml(loadingLabel)));
+
+        // 3. Loading spinner (below selector + season bar)
+        var spinnerWrap = jq('<div class="em-cards-area">');
+        spinnerWrap.html(loadingHtml(loadingLabel));
+        self._render.append(spinnerWrap);
 
         var params = {};
         if (title) { params.title = title; }
         if (year)  { params.year  = year; }
         if (tmdb)  { params.tmdb_id = tmdb; }
         if (imdb)  { params.imdb_id = imdb; }
-        // Always send original_title when available — even when same as title.
-        // The backend uses it for English-language search (Jackett) and Ukrainian
-        // audio discovery which requires the original (non-Cyrillic) title.
         if (orig)  { params.original_title = orig; }
         if (self._filterSeason)  { params.season  = self._filterSeason; }
         if (self._filterEpisode) { params.episode = self._filterEpisode; }
 
-        // ── Parallel fetch: /variants (TorBox+online providers) + /hdrezka (HdRezkaApi) ──
-        // Both are fired simultaneously; we wait until both complete before rendering.
-        // If one fails the other's results are still shown.
-        var variantsDone  = false;
-        var hdrezkaDone   = false;
+        // ── Fetch only the APIs relevant to the selected source ──────────────────
+        var wantTorbox = (self._activeSource === 'all' || self._activeSource === 'torbox');
+        var wantRezka  = (self._activeSource === 'all' || self._activeSource === 'rezka');
+
+        var variantsDone  = !wantTorbox;  // skip if not needed
+        var hdrezkaDone   = !wantRezka;   // skip if not needed
         var variantsData  = [];
         var hdrezkaData   = [];
         var torboxFastPath = false;
@@ -730,9 +776,6 @@
             if (!variantsDone || !hdrezkaDone) { return; }
             if (self._dead) { return; }
             try {
-                // Merge: existing /variants results + fresh HDRezka API variants
-                // HDRezka API variants carry source:'rezka' so they appear in the
-                // "HDRezka" source tab automatically.
                 var all = variantsData.concat(hdrezkaData);
                 log('merged variants N=' + all.length + ' (torrent=' + variantsData.length +
                     ' hdrezka=' + hdrezkaData.length + ')');
@@ -746,70 +789,65 @@
                 self._renderVariants();
             } catch (e) {
                 log('variants render error', e.message);
-                self._render.html('<div class="online-empty"><div class="online-empty__title">\u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f</div></div>');
+                spinnerWrap.html('<div class="online-empty"><div class="online-empty__title">\u041e\u0448\u0438\u0431\u043a\u0430 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f</div></div>');
             }
         }
 
-        // Fetch 1: /variants (TorBox + all online providers via backend)
-        apiGet('/variants', params, function (data) {
-            if (self._dead) { return; }
-            variantsDone = true;
-            variantsData = (data && data.variants && data.variants.length) ? data.variants : [];
-            log('variants loaded N=' + variantsData.length + (data && data.source ? ' source=' + data.source : ''));
-            if (data && data.source === 'torbox_direct') { torboxFastPath = true; }
-            _mergeAndRender();
-        }, function (err) {
-            if (self._dead) { return; }
-            log('variants error', err);
-            variantsDone = true;
-            if (!hdrezkaDone) {
-                // Show an intermediate error but keep waiting for HDRezka
-                self._render.empty();
-                self._render.append(jq('<div>').html(loadingHtml('HDRezka\u2026')));
-            }
-            _mergeAndRender();
-        });
+        if (wantTorbox) {
+            apiGet('/variants', params, function (data) {
+                if (self._dead) { return; }
+                variantsDone = true;
+                variantsData = (data && data.variants && data.variants.length) ? data.variants : [];
+                log('variants loaded N=' + variantsData.length + (data && data.source ? ' source=' + data.source : ''));
+                if (data && data.source === 'torbox_direct') { torboxFastPath = true; }
+                _mergeAndRender();
+            }, function (err) {
+                if (self._dead) { return; }
+                log('variants error', err);
+                variantsDone = true;
+                _mergeAndRender();
+            });
+        }
 
-        // Fetch 2: /hdrezka (HdRezkaApi library — direct streams)
-        var hdParams = {};
-        if (title) { hdParams.title = title; }
-        if (year)  { hdParams.year  = year; }
-        if (self._filterSeason)  { hdParams.season  = self._filterSeason; }
-        if (self._filterEpisode) { hdParams.episode = self._filterEpisode; }
+        if (wantRezka) {
+            var hdParams = {};
+            if (title) { hdParams.title = title; }
+            if (year)  { hdParams.year  = year; }
+            if (self._filterSeason)  { hdParams.season  = self._filterSeason; }
+            if (self._filterEpisode) { hdParams.episode = self._filterEpisode; }
 
-        apiGet('/hdrezka', hdParams, function (data) {
-            if (self._dead) { return; }
-            hdrezkaDone = true;
-            var files = (data && data.files) ? data.files : [];
-            // Convert file objects to Variant-compatible objects with source='rezka'
-            // so they appear under the "HDRezka" tab in the source selector.
-            hdrezkaData = [];
-            for (var fi = 0; fi < files.length; fi++) {
-                var f = files[fi];
-                if (!f.url) { continue; }
-                hdrezkaData.push({
-                    id:        'hdrezka_api_' + (f.quality || 'unknown'),
-                    label:     'HDRezka \u2022 RU \u2022 ' + (f.quality || '?').toUpperCase() + ' (Online)',
-                    quality:   f.quality   || 'unknown',
-                    url:       f.url,
-                    source:    'rezka',
-                    language:  'ru',
-                    voice:     '',
-                    is_cached: true,
-                    seeders:   0,
-                    size_mb:   0,
-                    codec:     '',
-                    magnet:    ''
-                });
-            }
-            log('hdrezka loaded N=' + hdrezkaData.length);
-            _mergeAndRender();
-        }, function (err) {
-            if (self._dead) { return; }
-            log('hdrezka error (non-fatal)', err);
-            hdrezkaDone = true;
-            _mergeAndRender();
-        });
+            apiGet('/hdrezka', hdParams, function (data) {
+                if (self._dead) { return; }
+                hdrezkaDone = true;
+                var files = (data && data.files) ? data.files : [];
+                hdrezkaData = [];
+                for (var fi = 0; fi < files.length; fi++) {
+                    var f = files[fi];
+                    if (!f.url) { continue; }
+                    hdrezkaData.push({
+                        id:        'hdrezka_api_' + (f.quality || 'unknown'),
+                        label:     'HDRezka \u2022 RU \u2022 ' + (f.quality || '?').toUpperCase() + ' (Online)',
+                        quality:   f.quality   || 'unknown',
+                        url:       f.url,
+                        source:    'rezka',
+                        language:  'ru',
+                        voice:     '',
+                        is_cached: true,
+                        seeders:   0,
+                        size_mb:   0,
+                        codec:     '',
+                        magnet:    ''
+                    });
+                }
+                log('hdrezka loaded N=' + hdrezkaData.length);
+                _mergeAndRender();
+            }, function (err) {
+                if (self._dead) { return; }
+                log('hdrezka error (non-fatal)', err);
+                hdrezkaDone = true;
+                _mergeAndRender();
+            });
+        }
     };
 
     EasyModVariants.prototype._renderVariants = function () {
@@ -827,15 +865,7 @@
 
         // Build source tabs from the FULL (unfiltered) variant list so all available
         // sources always appear in the tab bar, even after applying voice/quality filters.
-        var sourceTabBar = buildSourceTabs(variants, fs, function (srcKey) {
-            self._filterSource  = srcKey;
-            self._filterVoice   = '';
-            self._filterQuality = '';
-            self._filterLang    = '';
-            self._renderVariants();
-        });
-
-        // Apply source pre-filter: 'rezka'|'kinogo'|... → online only; 'torrent' → torrent only; '' → all
+        // Apply source pre-filter based on _filterSource (set by upfront source selector)
         var sourceFiltered = [];
         for (var sf = 0; sf < variants.length; sf++) {
             var vsf = variants[sf];
@@ -849,10 +879,7 @@
         }
 
         // Separate online variants from torrent-based variants.
-        // Online variants are always shown regardless of voice/quality filters
-        // because they represent a single stream per source — not multiple dubbed copies.
         var shownOnline = [];
-        // Torrent-only variants list (for building relevant filter pills and filtering)
         var torrentVariants = [];
         for (var k = 0; k < sourceFiltered.length; k++) {
             var v = sourceFiltered[k];
@@ -872,9 +899,7 @@
             shownTorrents.push(vt);
         }
 
-        // Build the filter bar from torrent-only variants so voice/quality/lang pills
-        // reflect torrent options (not online providers which have no dubbing variety).
-        // Season/episode come from self._seriesSeasons which applies to all sources.
+        // Filter bar for quality/voice/lang (season/episode already shown above by _fetchVariants upfront)
         var filterBarOnChange = function (type, val) {
             if (type === 'quality') {
                 self._filterQuality = val;
@@ -910,17 +935,31 @@
             filterBarOnChange
         );
 
-        // Put EVERYTHING (filter bar + variant cards) inside one Lampa.Scroll.
-        // This is critical for Android TV: only elements inside the Scroll are reachable
-        // with the TV remote d-pad.  Having them in separate sibling containers means the
-        // filter buttons are unreachable when using a remote.
+        // ── Rebuild page: source selector + filter bar FLAT, then cards in Scroll ──
+        // Destroy previous scroll
+        try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) { log('scroll destroy', e.message); }
+        self._scroll = null;
         self._render.empty();
+
+        // 1. Source selector (always shown flat, not inside scroll)
+        var srcSel2 = buildSourceSelector(self._activeSource, function (key) {
+            self._activeSource  = key;
+            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : '';
+            self._allVariants   = [];
+            self._filterVoice   = '';
+            self._filterQuality = '';
+            self._filterLang    = '';
+            self._fetchVariants();
+        });
+        self._render.append(srcSel2);
+
+        // 2. Filter bar (season/episode/quality/voice/lang) FLAT — NOT inside scroll.
+        // This fixes the TV-remote navigation bug where season/episode buttons were
+        // invisible because they were clipped inside Lampa.Scroll.
+        if (filterBar) { self._render.append(filterBar); }
 
         var totalShown = shownOnline.length + shownTorrents.length;
         if (!totalShown) {
-            // No matching variants — show source tabs + filter bar + "nothing found" message flat.
-            if (sourceTabBar) { self._render.append(sourceTabBar); }
-            if (filterBar) { self._render.append(filterBar); }
             self._render.append(
                 '<div class="online-empty" style="padding:1em 0">' +
                 '<div class="online-empty__title">\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</div>' +
@@ -939,20 +978,14 @@
             );
         }
 
-        // Wrap everything in one Lampa.Scroll so d-pad navigates filter buttons + cards.
+        // 3. Cards list — inside Lampa.Scroll (only the cards, not the filter UI)
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
 
-            // Source tab selector goes FIRST (above all filters and cards).
-            if (sourceTabBar) { sc.body().append(sourceTabBar); }
-            // Season/episode filter bar goes second.
-            if (filterBar) { sc.body().append(filterBar); }
-
             // ── Online sources section ──────────────────────────────────────────
             if (shownOnline.length > 0) {
                 var onlineSec = jq('<div class="em-section-online">');
-                // Only show the divider header when both sections are visible
                 if (shownTorrents.length > 0) { onlineSec.append(buildSectionHeader(_HEADER_ONLINE)); }
                 for (var i = 0; i < shownOnline.length; i++) {
                     (function (vo) {
@@ -965,7 +998,6 @@
             // ── Easy-Mod (torrent) section ──────────────────────────────────────
             if (shownTorrents.length > 0) {
                 var torrentSec = jq('<div class="em-section-torrent">');
-                // Only show the divider header when both sections are visible
                 if (shownOnline.length > 0) { torrentSec.append(buildSectionHeader(_HEADER_EASYMOD)); }
                 for (var j = 0; j < shownTorrents.length; j++) {
                     (function (vt2) {
@@ -980,8 +1012,6 @@
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
-            if (sourceTabBar) { self._render.append(sourceTabBar); }
-            if (filterBar) { self._render.append(filterBar); }
             var list = jq('<div style="padding:0 1em">');
             if (shownOnline.length > 0) {
                 if (shownTorrents.length > 0) { list.append(buildSectionHeader(_HEADER_ONLINE)); }

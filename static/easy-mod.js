@@ -1107,18 +1107,18 @@
             );
         }
 
-        // 2. All content (source selector + filter bar + cards) inside ONE Lampa.Scroll.
-        // Putting filter buttons inside the scroll body makes them keyboard/remote-navigable
-        // alongside the cards — users can press Up/Down/Left/Right to reach both filters
-        // and results using a TV remote or keyboard.
+        // 2. Source selector + filter bar as DIRECT children of self._render.
+        // Keeping them outside the Lampa.Scroll ensures they are always visible —
+        // they are never hidden inside a scrollable viewport or clipped by the
+        // scroll container's computed height.
+        self._render.append(srcSel2);
+        if (trBar) { self._render.append(trBar); }
+        if (filterBar) { self._render.append(filterBar); }
+
+        // 3. Cards grid inside ONE Lampa.Scroll for keyboard/remote navigation.
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
-
-            // ── Filter area at the top of the scroll body ───────────────────────
-            sc.body().append(srcSel2);
-            if (trBar) { sc.body().append(trBar); }
-            if (filterBar) { sc.body().append(filterBar); }
 
             // ── Online sources section ──────────────────────────────────────────
             if (shownOnline.length > 0) {
@@ -1149,10 +1149,7 @@
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
-            // Fallback: flat layout without scroll
-            self._render.append(srcSel2);
-            if (trBar) { self._render.append(trBar); }
-            if (filterBar) { self._render.append(filterBar); }
+            // Fallback: flat layout without scroll (filter buttons already appended above)
             var list = jq('<div style="padding:0 1em">');
             if (shownOnline.length > 0) {
                 if (shownTorrents.length > 0) { list.append(buildSectionHeader(_HEADER_ONLINE)); }

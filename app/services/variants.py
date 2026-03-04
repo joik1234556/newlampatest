@@ -37,6 +37,14 @@ _QUALITY_ORDER = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k":
 # Raised from 10 to 15 so that diverse dubbing/language options are visible.
 _MAX_RESULTS = 15
 
+# Source keys for online (instant-play) providers.
+_ONLINE_SOURCES = frozenset({"rezka", "kinogo", "videocdn", "kodik"})
+
+# Minimum seeder count for torrent variants.
+# TorBox reliably caches well-seeded torrents (≥8 seeders → very likely in
+# TorBox's global cache → instant add+play with no wait time).
+_MIN_SEEDERS = 8
+
 
 def _quality_rank(q: str) -> int:
     return _QUALITY_ORDER.get(q.lower(), 2)
@@ -381,9 +389,28 @@ async def get_variants(
         if v.id in cached_variant_ids:
             v.is_cached = True
 
-    # Sort: online (url-based) first, then cached torrents, then seeders desc, quality desc
-    _ONLINE_SOURCES = frozenset({"rezka", "kinogo", "videocdn", "kodik"})
+    # ── Seeder quality filter ──────────────────────────────────────────────
+    # Remove torrent variants with very few seeders to maximise the chance of
+    # a TorBox global-cache hit (see module-level _MIN_SEEDERS and _ONLINE_SOURCES).
+    # Online variants (rezka/kinogo/etc.) and already-cached TorBox torrents
+    # are always kept regardless of seeder count.
+    seeder_filtered = [
+        v for v in deduped
+        if (v.source in _ONLINE_SOURCES)   # always keep online streaming variants
+        or v.is_cached                     # always keep TorBox-cached torrents
+        or (v.seeders >= _MIN_SEEDERS)     # keep well-seeded torrents
+    ]
+    # Only apply the filter when it still leaves results — fall back to the full
+    # unfiltered list to avoid returning an empty response.
+    if seeder_filtered:
+        deduped = seeder_filtered
+    else:
+        logger.info(
+            "[Easy-Mod][Variants] seeder filter kept 0 results — skipping filter for title=%s",
+            title,
+        )
 
+    # Sort: online (url-based) first, then cached torrents, then seeders desc, quality desc
     def _sort_key(v: Variant):
         return (
             2 if v.source in _ONLINE_SOURCES else (1 if v.is_cached else 0),

@@ -605,6 +605,7 @@
         this._isSeries      = false;
         this._seriesSeasons = [];
         this._episodeCounts = {};  // season_number → episode_count
+        this._variantsNetErr = false; // true when the last /variants request failed at the network layer
         // HDRezka translator selection
         this._rezkaTranslators  = [];   // [{id, name, premium}] — fetched from /hdrezka/info
         this._rezkaUrl          = '';   // resolved HDRezka page URL (reused across translator switches)
@@ -803,6 +804,7 @@
         var variantsData  = [];
         var hdrezkaData   = [];
         var torboxFastPath = false;
+        var variantsNetErr = false;  // true when the /variants request itself failed (network / 5xx)
 
         function _mergeAndRender() {
             if (!variantsDone || !hdrezkaDone) { return; }
@@ -812,6 +814,7 @@
                 log('merged variants N=' + all.length + ' (torrent=' + variantsData.length +
                     ' hdrezka=' + hdrezkaData.length + ')');
                 self._allVariants  = all;
+                self._variantsNetErr = variantsNetErr;
                 self._filterVoice  = '';
                 self._filterQuality = '';
                 self._filterLang    = '';
@@ -836,6 +839,7 @@
             }, function (err) {
                 if (self._dead) { return; }
                 log('variants error', err);
+                variantsNetErr = true;
                 variantsDone = true;
                 _mergeAndRender();
             });
@@ -1056,12 +1060,20 @@
 
         var totalShown = shownOnline.length + shownTorrents.length;
         if (!totalShown) {
-            var emptyMsg = variants.length > 0
-                ? '\u041d\u0435\u0442 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u0444\u0438\u043b\u044c\u0442\u0440\u043e\u0432'
-                : '\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e';
-            var emptyHint = variants.length === 0
-                ? '<div class="online-empty__time">\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0438 API-\u043a\u043b\u044e\u0447\u0438</div>'
-                : '';
+            var emptyMsg, emptyHint;
+            if (variants.length > 0) {
+                // Variants exist but were all filtered out
+                emptyMsg  = '\u041d\u0435\u0442 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432 \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u0444\u0438\u043b\u044c\u0442\u0440\u043e\u0432';
+                emptyHint = '';
+            } else if (self._variantsNetErr) {
+                // Could not reach the backend server at all
+                emptyMsg  = '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c\u0441\u044f \u043a \u0441\u0435\u0440\u0432\u0435\u0440\u0443';
+                emptyHint = '<div class="online-empty__time">\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0430\u0434\u0440\u0435\u0441 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0432 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\u0445 Easy-Mod</div>';
+            } else {
+                // Server responded but providers found nothing
+                emptyMsg  = '\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e';
+                emptyHint = '<div class="online-empty__time">\u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435 \u0438\u043b\u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a</div>';
+            }
             self._render.append(
                 '<div class="online-empty" style="padding:1em 0">' +
                 '<div class="online-empty__title">' + emptyMsg + '</div>' +

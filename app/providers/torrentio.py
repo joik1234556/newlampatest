@@ -16,13 +16,13 @@ from typing import Optional
 
 import httpx
 
+from app.config import TORRENTIO_BASE
 from app.models import Variant
 from app.providers.base import BaseProvider
 from app.providers.jackett import _guess_voice
 
 logger = logging.getLogger(__name__)
 
-TORRENTIO_BASE = "https://torrentio.strem.fun"
 _CINEMETA_BASE = "https://v3-cinemeta.strem.io"
 
 _QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)

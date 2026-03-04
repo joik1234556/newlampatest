@@ -1014,13 +1014,15 @@
             filterBarOnChange
         );
 
-        // ── Rebuild page: source selector + filter bar FLAT, then cards in Scroll ──
+        // ── Rebuild page: all content (source selector + filter bar + cards) in ONE Scroll ──
+        // Putting everything inside a single Lampa.Scroll makes ALL .selector elements
+        // reachable via keyboard/remote arrows — filter buttons are navigable just like cards.
         // Destroy previous scroll
         try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) { log('scroll destroy', e.message); }
         self._scroll = null;
         self._render.empty();
 
-        // 1. Source selector (always shown flat, not inside scroll)
+        // 1. Source selector
         var srcSel2 = buildSourceSelector(self._activeSource, function (key) {
             self._activeSource  = key;
             self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : '';
@@ -1031,13 +1033,13 @@
             if (key !== 'rezka') { self._resetRezkaState(); }
             self._fetchVariants();
         });
-        self._render.append(srcSel2);
 
         // 1b. HDRezka translator/voice selector — shown when rezka source is active
         //     and we have more than one translator available.
+        var trBar = null;
         if ((self._activeSource === 'rezka' || self._activeSource === 'all') &&
             self._rezkaTranslators && self._rezkaTranslators.length > 1) {
-            var trBar = jq('<div class="em-source-tabs" style="margin-top:.5em">');
+            trBar = jq('<div class="em-source-tabs" style="margin-top:.5em">');
             trBar.append(
                 jq('<span style="font-size:.85em;opacity:.7;margin-right:.5em;align-self:center">')
                     .text('\u0413\u043e\u043b\u043e\u0441:')  // "Голос:"
@@ -1059,13 +1061,7 @@
                     trBar.append(tbtn);
                 })(self._rezkaTranslators[tri]);
             }
-            self._render.append(trBar);
         }
-
-        // 2. Filter bar (season/episode/quality/voice/lang) FLAT — NOT inside scroll.
-        // This fixes the TV-remote navigation bug where season/episode buttons were
-        // invisible because they were clipped inside Lampa.Scroll.
-        if (filterBar) { self._render.append(filterBar); }
 
         var totalShown = shownOnline.length + shownTorrents.length;
         if (!totalShown) {
@@ -1083,6 +1079,10 @@
                 emptyMsg  = '\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e';
                 emptyHint = '<div class="online-empty__time">\u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435 \u0438\u043b\u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a</div>';
             }
+            // Show source selector + empty message (no scroll needed)
+            self._render.append(srcSel2);
+            if (trBar) { self._render.append(trBar); }
+            if (filterBar) { self._render.append(filterBar); }
             self._render.append(
                 '<div class="online-empty" style="padding:1em 0">' +
                 '<div class="online-empty__title">' + emptyMsg + '</div>' +
@@ -1102,10 +1102,18 @@
             );
         }
 
-        // 3. Cards list — inside Lampa.Scroll (only the cards, not the filter UI)
+        // 2. All content (source selector + filter bar + cards) inside ONE Lampa.Scroll.
+        // Putting filter buttons inside the scroll body makes them keyboard/remote-navigable
+        // alongside the cards — users can press Up/Down/Left/Right to reach both filters
+        // and results using a TV remote or keyboard.
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
+
+            // ── Filter area at the top of the scroll body ───────────────────────
+            sc.body().append(srcSel2);
+            if (trBar) { sc.body().append(trBar); }
+            if (filterBar) { sc.body().append(filterBar); }
 
             // ── Online sources section ──────────────────────────────────────────
             if (shownOnline.length > 0) {
@@ -1136,6 +1144,10 @@
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
+            // Fallback: flat layout without scroll
+            self._render.append(srcSel2);
+            if (trBar) { self._render.append(trBar); }
+            if (filterBar) { self._render.append(filterBar); }
             var list = jq('<div style="padding:0 1em">');
             if (shownOnline.length > 0) {
                 if (shownTorrents.length > 0) { list.append(buildSectionHeader(_HEADER_ONLINE)); }
@@ -1242,10 +1254,10 @@
         this._timer   = null;
         this._ticks        = 0;
         this._statusErrors = 0;
-        this._FAST_TICKS   = 30;
-        this._FAST_INTERVAL= 500;
-        this._SLOW_INTERVAL= 3000;
-        this._MAX_TICKS    = 75;
+        this._FAST_TICKS   = 60;   // 60 × 300 ms = 18 s of aggressive polling
+        this._FAST_INTERVAL= 300;  // 300 ms — catches instantly-cached torrents ASAP
+        this._SLOW_INTERVAL= 1000; // 1 s — keep checking frequently even when slow
+        this._MAX_TICKS    = 200;
     }
 
     EasyModWait.prototype.create = function () { return this._render; };
@@ -1277,6 +1289,10 @@
                 try { Lampa.Activity.back(); } catch (e2) {}
             }
         });
+
+        // Activate Lampa's content controller so the back button (and any other
+        // .selector elements) can be reached via remote-control / keyboard arrows.
+        try { Lampa.Controller.toggle('content'); } catch (e) {}
 
         self._poll();
     };

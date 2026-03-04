@@ -402,7 +402,12 @@ async def _process_job(job_id: str) -> None:
             if _imm_try > 0:
                 await asyncio.sleep(1)
             try:
-                torrent_imm = await torbox.get_torrent_by_id(torrent_id)
+                # bypass_cache=True: force TorBox to return a fresh response so we
+                # see the current download_state and the populated files list.
+                # Without this, TorBox may serve a stale cached response where
+                # download_state is still "downloading" even though the torrent is
+                # already seeding, causing us to miss the instant-play window.
+                torrent_imm = await torbox.get_torrent_by_id(torrent_id, bypass_cache=True)
                 if torrent_imm:
                     st_imm = torrent_imm.get("download_state", "")
                     files_imm = torrent_imm.get("files") or []

@@ -44,6 +44,9 @@ class StreamStartRequest(BaseModel):
     variant_id: str = Field(..., description="Variant ID from /variants")
     magnet: str = Field(..., description="Magnet link to submit to TorBox")
     title: str = Field("", description="Human-readable title for logging")
+    # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    season: Optional[int] = Field(None, description="TV series season number (for episode-specific file selection)")
+    episode: Optional[int] = Field(None, description="TV series episode number (for episode-specific file selection)")
 
 
 class StreamJob(BaseModel):
@@ -57,6 +60,9 @@ class StreamJob(BaseModel):
     direct_url: Optional[str] = None
     torrent_id: Optional[str] = None
     message: str = ""
+    # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    season: Optional[int] = None   # requested TV season (for episode-specific file picking)
+    episode: Optional[int] = None  # requested TV episode (for episode-specific file picking)
 
 
 class StreamStatusResponse(BaseModel):

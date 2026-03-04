@@ -93,6 +93,106 @@ def _extract_infohash(magnet: str) -> Optional[str]:
     return m.group(1).lower() if m else None
 
 
+# === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+# Regex patterns for extracting episode and season numbers from filenames.
+# Keep in sync with _EP_RE / _fileEpNum() in app/routers/stream.py and easy-mod.js.
+_SVC_EP_RE = re.compile(
+    r"[Ss]\d{1,2}[Ee](\d{1,3})"                             # S01E03 → group 1
+    r"|\b\d{1,2}[xX](\d{1,3})\b"                            # 1x03   → group 2
+    r"|[Ee][Pp]?(\d{1,3})"                                   # E03, EP03 → group 3
+    r"|\b(?:episode|серия)\s*(\d{1,3})\b"                    # episode/серия 3 → group 4
+    r"|\b(\d{1,3})\s+серия\b"                                # 12 серия → group 5
+    r"|\[0*([1-9]\d?)\]|\(0*([1-9]\d?)\)"                   # [03] or (03) → groups 6-7
+    r"|(?:^|[\s._\-])0*([1-9]\d?)(?:v\d)?(?:[\s._\-]|$)",  # standalone 1-99 → group 8
+    re.IGNORECASE,
+)
+
+_SVC_SEASON_RE = re.compile(
+    r"[Ss](\d{1,2})[Ee]\d"                                  # S01E03 → group 1
+    r"|\b[Ss]eason\s*(\d{1,2})\b"                           # Season 1 → group 2
+    r"|\b[Сс]езон\s*(\d{1,2})\b"                            # Сезон 1 → group 3
+    r"|\b(\d{1,2})[xX]\d{1,3}\b",                           # 1x03 → group 4
+    re.IGNORECASE,
+)
+
+
+def _ep_num_from_file(name: str) -> int:
+    """Extract episode number from a filename. Returns 0 when not found."""
+    basename = (name or "").split("/")[-1].split("\\")[-1]
+    m = _SVC_EP_RE.search(basename)
+    if not m:
+        return 0
+    for g in m.groups():
+        if g is not None:
+            return int(g)
+    return 0
+
+
+def _season_num_from_file(name: str) -> int:
+    """Extract season number from a filename. Returns 0 when not found."""
+    basename = (name or "").split("/")[-1].split("\\")[-1]
+    m = _SVC_SEASON_RE.search(basename)
+    if not m:
+        return 0
+    for g in m.groups():
+        if g is not None:
+            return int(g)
+    return 0
+
+
+def _pick_video_file_for_episode(
+    files: list[dict],
+    episode: Optional[int] = None,
+    season: Optional[int] = None,
+) -> dict | None:
+    """
+    === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    Pick the video file matching the requested season/episode from a torrent file list.
+
+    When ``episode`` is given, narrows to files whose name matches that episode.
+    When ``season`` is also given, further filters by season.
+    Files with no detectable season number (returns 0) are kept as valid candidates
+    because some episode-only filenames omit the season prefix.
+    Falls back to _pick_video_file() when no episode-specific match is found.
+    """
+    if episode is None:
+        return _pick_video_file(files)
+
+    video_files = [
+        f for f in files
+        if any((f.get("name") or f.get("short_name") or "").lower().endswith(ext)
+               for ext in _VIDEO_EXTS)
+    ]
+    if not video_files:
+        return _pick_video_file(files)
+
+    # Filter by episode number
+    ep_match = [f for f in video_files
+                if _ep_num_from_file(f.get("name") or f.get("short_name") or "") == episode]
+
+    # Further narrow by season when specified (0 = no season tag in filename → keep)
+    if season and ep_match:
+        season_match = [
+            f for f in ep_match
+            if _season_num_from_file(f.get("name") or f.get("short_name") or "") in (0, season)
+        ]
+        if season_match:
+            ep_match = season_match
+
+    if ep_match:
+        logger.info(
+            "[Easy-Mod][Stream] episode-aware pick: %d match(es) for S%02dE%02d",
+            len(ep_match), season or 0, episode,
+        )
+        return max(ep_match, key=lambda f: int(f.get("size", 0) or 0))
+
+    logger.info(
+        "[Easy-Mod][Stream] episode-aware pick: no match for S%02dE%02d — fallback to largest",
+        season or 0, episode,
+    )
+    return _pick_video_file(files)
+
+
 # ---------------------------------------------------------------------------
 # Job persistence (Redis-backed via CacheBackend)
 # ---------------------------------------------------------------------------
@@ -187,6 +287,9 @@ async def create_job(req: StreamStartRequest) -> StreamJob:
             progress=1.0,
             direct_url=cached_url,
             message="Cached direct link",
+            # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+            season=req.season or None,
+            episode=req.episode or None,
         )
         await _save_job(job)
         return job
@@ -209,6 +312,9 @@ async def create_job(req: StreamStartRequest) -> StreamJob:
         magnet_hash=mhash,
         title=req.title,
         state="queued",
+        # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+        season=req.season or None,
+        episode=req.episode or None,
     )
     await _save_job(job)
     await magnet_job_cache.aset(mhash, job.job_id, ttl=JOB_TTL)
@@ -275,7 +381,8 @@ async def _process_job(job_id: str) -> None:
                     # If already seeding/completed and files are listed, get link now
                     _READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
                     if ex_state in _READY_STATES and ex_files:
-                        best_file = _pick_video_file(ex_files)
+                        # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+                        best_file = _pick_video_file_for_episode(ex_files, job.episode, job.season)
                         file_id = best_file.get("id") if best_file else None
                         if file_id is not None:
                             try:
@@ -423,7 +530,8 @@ async def _process_job(job_id: str) -> None:
                         _imm_try + 1, st_imm, len(files_imm), job_id,
                     )
                     if st_imm in _TORBOX_READY_STATES and files_imm:
-                        best_imm = _pick_video_file(files_imm)
+                        # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+                        best_imm = _pick_video_file_for_episode(files_imm, job.episode, job.season)
                         fid = best_imm.get("id") if best_imm else None
                         if fid is not None:
                             try:
@@ -538,7 +646,8 @@ async def _process_job(job_id: str) -> None:
             # TorBox direct links support Range requests — player can stream
             # even while the torrent is still downloading (progressive play).
             if files:
-                best_file = _pick_video_file(files)
+                # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+                best_file = _pick_video_file_for_episode(files, job.episode, job.season)
                 file_id = best_file.get("id") if best_file else None
                 if file_id is not None:
                     try:

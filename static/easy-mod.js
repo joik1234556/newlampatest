@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '6.5';
+    var VERSION = '6.6';
     var API_DEFAULT = 'http://46.225.222.255:8000';
     var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
 
@@ -1240,6 +1240,9 @@
             variant_id: variant.id     || '',
             magnet:     variant.magnet || '',
             title:      m.title || m.name || 'Easy-Mod',
+            // === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+            season:  self._filterSeason  || null,
+            episode: self._filterEpisode || null,
         };
 
         self._render.html(loadingHtml('\u0417\u0430\u043f\u0443\u0441\u043a \u043f\u043e\u0442\u043e\u043a\u0430\u2026'));

@@ -91,3 +91,28 @@ class TorrentFilesResponse(BaseModel):
     job_id: str
     torrent_id: str
     files: list[TorrentFileItem] = []
+
+
+# === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+
+class TorrentEpisodeItem(BaseModel):
+    """A single episode entry inside a season pack."""
+    episode: int = Field(..., description="Episode number")
+    title: str = Field(..., description="Episode title / filename label")
+    file_id: str = Field(..., description="TorBox file ID for requestdl / proxy_file")
+    quality: str = Field("", description="Guessed quality from filename")
+    size_mb: int = Field(0, description="File size in megabytes")
+
+
+class TorrentSeasonItem(BaseModel):
+    """A single season inside a season-pack torrent."""
+    season: int = Field(..., description="Season number")
+    episodes: list[TorrentEpisodeItem] = []
+
+
+class TorrentSeasonsResponse(BaseModel):
+    """Structured season/episode list for a whole-season-pack torrent."""
+    job_id: str
+    torrent_id: str
+    title: str = ""
+    seasons: list[TorrentSeasonItem] = []

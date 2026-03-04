@@ -1443,6 +1443,32 @@
         var m = self._movie || {};
         var wantEp     = self._episode || 0;
         var wantSeason = self._season  || 0;
+
+        // === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+        // Try /stream/seasons first — returns structured season/episode list for season packs.
+        // If the torrent has season data, show a structured picker; otherwise fall back to
+        // flat file list via /stream/files as before.
+        apiGet('/stream/seasons', { job_id: jobId }, function (data) {
+            if (self._dead && self._dead !== 'picker' && self._dead !== 'playing') { return; }
+            var seasons = (data && data.seasons) || [];
+            var hasSeasons = seasons.length > 0 && seasons.some(function (s) { return s.episodes && s.episodes.length > 0; });
+            if (hasSeasons) {
+                // Season pack detected — try to auto-play the requested episode,
+                // or show the structured season/episode picker.
+                self._dead = 'picker';
+                self._showSeasonPicker(seasons, jobId, defaultUrl, m, wantSeason, wantEp);
+                return;
+            }
+            // No season structure — fall back to flat file list
+            self._fetchFilePicker(defaultUrl, jobId, m, wantSeason, wantEp);
+        }, function () {
+            // /stream/seasons error (e.g. 409 torrent not assigned yet) — fall back to /stream/files
+            self._fetchFilePicker(defaultUrl, jobId, m, wantSeason, wantEp);
+        });
+    };
+
+    EasyModWait.prototype._fetchFilePicker = function (defaultUrl, jobId, m, wantSeason, wantEp) {
+        var self = this;
         // Fetch file list from /stream/files
         apiGet('/stream/files', { job_id: jobId }, function (data) {
             if (self._dead && self._dead !== 'picker' && self._dead !== 'playing') { return; }
@@ -1454,6 +1480,7 @@
                 return;
             }
             // _showFilePicker handles episode matching, auto-play and filtered picker display
+            self._dead = 'picker';
             self._showFilePicker(videoFiles, jobId, defaultUrl, m, wantSeason, wantEp);
         }, function () {
             // Error fetching files — fall back to default URL
@@ -1515,6 +1542,78 @@
         if (e)      { return '\u0421\u0435\u0440\u0438\u044f ' + e; }
         return (name || '').split(/[\\/]/).pop();
     }
+
+    // === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    // _showSeasonPicker — display structured season/episode picker from /stream/seasons response.
+    // seasons: array of { season, episodes: [{ episode, title, file_id, quality, size_mb }] }
+    // If wantSeason + wantEp are set, try to auto-play without showing the picker.
+    EasyModWait.prototype._showSeasonPicker = function (seasons, jobId, defaultUrl, m, wantSeason, wantEp) {
+        var self = this;
+        wantSeason = wantSeason || 0;
+        wantEp     = wantEp     || 0;
+
+        // Try auto-play: find the exact episode without showing picker UI
+        if (wantEp) {
+            var targetSeason = wantSeason ? seasons.filter(function (s) { return s.season === wantSeason; }) : seasons;
+            if (targetSeason.length === 0) { targetSeason = seasons; }  // fallback to all seasons
+            var found = null;
+            for (var si = 0; si < targetSeason.length; si++) {
+                var eps = targetSeason[si].episodes || [];
+                for (var ei = 0; ei < eps.length; ei++) {
+                    if (eps[ei].episode === wantEp) { found = eps[ei]; break; }
+                }
+                if (found) { break; }
+            }
+            if (found) {
+                self._playReady(getApi() + '/stream/proxy_file' + qs({ job_id: jobId, file_id: String(found.file_id) }));
+                return;
+            }
+        }
+
+        // Build picker UI
+        self._render.empty();
+        var wrap = jq('<div class="em-wait" style="padding:1em 1.5em">');
+
+        // If only one season and no season filter requested, skip season level and show episodes directly
+        if (seasons.length === 1 || wantSeason) {
+            var activeSeason = wantSeason ? (seasons.filter(function (s) { return s.season === wantSeason; })[0] || seasons[0]) : seasons[0];
+            var hdr = '\u0421\u0435\u0437\u043e\u043d ' + activeSeason.season + ' \u2014 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0435\u0440\u0438\u044e:';
+            wrap.append(jq('<div class="em-wait__msg" style="margin-bottom:.7em">').text(hdr));
+            var listEl = jq('<div class="em-file-list">');
+            var epList = activeSeason.episodes || [];
+            for (var fi = 0; fi < epList.length; fi++) {
+                (function (ep) {
+                    var item = jq('<div class="em-file-item selector">');
+                    item.append(jq('<span class="em-file-name">').text('\u0421\u0435\u0440\u0438\u044f ' + ep.episode));
+                    if (ep.quality) { item.append(jq('<span class="em-file-quality">').text(ep.quality.toUpperCase())); }
+                    if (ep.size_mb > 0) { item.append(jq('<span class="em-file-size">').text(fmtSize(ep.size_mb))); }
+                    item.on('hover:enter click', function () {
+                        self._playReady(getApi() + '/stream/proxy_file' + qs({ job_id: jobId, file_id: String(ep.file_id) }));
+                    });
+                    listEl.append(item);
+                })(epList[fi]);
+            }
+            wrap.append(listEl);
+        } else {
+            // Multiple seasons — show season selector first
+            wrap.append(jq('<div class="em-wait__msg" style="margin-bottom:.7em">').text('\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0435\u0437\u043e\u043d:'));
+            var seasonList = jq('<div class="em-file-list">');
+            for (var sj = 0; sj < seasons.length; sj++) {
+                (function (sn) {
+                    var sItem = jq('<div class="em-file-item selector">');
+                    sItem.append(jq('<span class="em-file-name">').text('\u0421\u0435\u0437\u043e\u043d ' + sn.season + ' (' + (sn.episodes || []).length + ' \u0441\u0435\u0440\u0438\u0439)'));
+                    sItem.on('hover:enter click', function () {
+                        self._showSeasonPicker(seasons, jobId, defaultUrl, m, sn.season, 0);
+                    });
+                    seasonList.append(sItem);
+                })(seasons[sj]);
+            }
+            wrap.append(seasonList);
+        }
+
+        self._render.append(wrap);
+        activateLampaNav(self._render);
+    };
 
     // wantSeason/wantEp: 0 = no filter; > 0 = pre-filter and auto-play if single match.
     EasyModWait.prototype._showFilePicker = function (files, jobId, defaultUrl, m, wantSeason, wantEp) {

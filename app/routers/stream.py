@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.limiter_shared import limiter
-from app.models import StreamJob, StreamStartRequest, StreamStatusResponse, TorrentFilesResponse, TorrentFileItem
+from app.models import StreamJob, StreamStartRequest, StreamStatusResponse, TorrentFilesResponse, TorrentFileItem, TorrentSeasonsResponse, TorrentSeasonItem, TorrentEpisodeItem
 from app.services import stream as stream_svc
 import app.torbox as torbox
 
@@ -211,6 +211,119 @@ async def stream_files(
         job_id=job_id.strip(),
         torrent_id=job.torrent_id,
         files=items,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /stream/seasons — structured season/episode list for season-pack torrents
+# === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+# ---------------------------------------------------------------------------
+
+_SN_RE = re.compile(
+    r"[Ss](\d{1,2})[Ee]\d"                   # S01E03 → group 1
+    r"|\b[Ss]eason[\s._\-]*(\d{1,2})\b"      # Season 1 / Season.1 → group 2
+    r"|\b[Сс]езон[\s._\-]*(\d{1,2})\b"       # Сезон 1 → group 3
+    r"|\b(\d{1,2})[xX]\d{1,3}\b",            # 1x03 → group 4
+    re.IGNORECASE,
+)
+
+
+def _season_from_name(name: str) -> int:
+    """Extract season number from a filename. Returns 0 when not found (default season)."""
+    basename = name.split("/")[-1].split("\\")[-1]
+    m = _SN_RE.search(basename)
+    if not m:
+        return 0
+    for g in m.groups():
+        if g is not None:
+            return int(g)
+    return 0
+
+
+@router.get("/seasons", response_model=TorrentSeasonsResponse)
+@limiter.limit("60/minute")
+async def stream_seasons(
+    request: Request,
+    job_id: str = Query(..., description="Job ID returned by /stream/start"),
+) -> TorrentSeasonsResponse:
+    """
+    Return a structured seasons/episodes list for a whole-season-pack torrent.
+
+    === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    When a torrent contains multiple video files (season pack), this endpoint
+    returns a structured response with seasons → episodes that the client can
+    display as a native episode picker.
+
+    Each episode entry includes the TorBox file_id so the client can request a
+    direct link via /stream/proxy_file?job_id=&file_id=
+    """
+    if not job_id.strip():
+        raise HTTPException(status_code=400, detail="job_id must not be empty")
+
+    job = stream_svc.get_job(job_id.strip())
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    if not job.torrent_id:
+        raise HTTPException(status_code=409, detail="Torrent not yet assigned to this job")
+
+    try:
+        torrent = await torbox.get_torrent_by_id(job.torrent_id)
+    except Exception as exc:
+        logger.error("[Easy-Mod][/stream/seasons] TorBox error: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if torrent is None:
+        raise HTTPException(status_code=404, detail=f"Torrent not found in TorBox: {job.torrent_id}")
+
+    raw_files: list[dict] = torrent.get("files") or []
+    torrent_title: str = torrent.get("name") or torrent.get("title") or ""
+
+    # Collect video files and group by season
+    seasons_map: dict[int, list[TorrentEpisodeItem]] = {}
+    for f in raw_files:
+        fid = f.get("id")
+        if fid is None:
+            continue
+        name = f.get("name") or f.get("short_name") or str(fid)
+        ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if ext not in _VIDEO_EXTS:
+            continue
+
+        ep_num = _episode_num(name)
+        if ep_num == 0:
+            continue  # skip files without detectable episode number
+
+        s_num = _season_from_name(name)
+        if s_num == 0:
+            s_num = 1  # default to season 1 when season not in filename
+
+        size_bytes = int(f.get("size", 0) or 0)
+        size_mb = size_bytes // (1024 * 1024)
+        quality = torbox.guess_quality(name)
+
+        ep_item = TorrentEpisodeItem(
+            episode=ep_num,
+            title=f"S{s_num:02d}E{ep_num:02d} — {name.split('/')[-1].split('\\')[-1]}",
+            file_id=str(fid),
+            quality=quality,
+            size_mb=size_mb,
+        )
+        if s_num not in seasons_map:
+            seasons_map[s_num] = []
+        seasons_map[s_num].append(ep_item)
+
+    # Sort seasons and episodes
+    season_items: list[TorrentSeasonItem] = []
+    for s_key in sorted(seasons_map.keys()):
+        eps = sorted(seasons_map[s_key], key=lambda e: e.episode)
+        season_items.append(TorrentSeasonItem(season=s_key, episodes=eps))
+
+    return TorrentSeasonsResponse(
+        job_id=job_id.strip(),
+        torrent_id=job.torrent_id,
+        title=torrent_title,
+        seasons=season_items,
     )
 
 

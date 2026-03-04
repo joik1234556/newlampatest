@@ -1156,7 +1156,8 @@ class TestTorboxGetTorrentUrl:
 
 class TestVariantsTop3:
     def test_variants_at_most_max(self, client):
-        """After sorting by seeders, at most _MAX_RESULTS (10) variants are returned."""
+        """After sorting by seeders, at most _MAX_RESULTS variants are returned.
+        720p and below are filtered out (only 1080p+ shown for torrent variants)."""
         from unittest.mock import AsyncMock, patch
         from app.models import Variant
         from app.providers.torrentio import TorrentioProvider
@@ -1177,11 +1178,13 @@ class TestVariantsTop3:
             resp = client.get("/variants?title=Top3TestFilmXYZ123&year=2025")
         assert resp.status_code == 200
         variants = resp.json()["variants"]
-        # All 5 fit within _MAX_RESULTS (10), sorted by seeders desc
-        assert len(variants) == 5
+        # 720p is filtered out; only 1080p+ variants are returned (4 of 5)
+        assert len(variants) == 4
         # First result must be the one with most seeders (v3: 200)
         assert variants[0]["id"] == "v3"
         assert variants[0]["seeders"] == 200
+        # No 720p variant in results
+        assert all(v["quality"] != "720p" for v in variants)
 
     def test_variants_quality_filter(self, client):
         """?quality=1080p returns only 1080p variants."""

@@ -34,8 +34,15 @@ logger = logging.getLogger(__name__)
 _QUALITY_ORDER = {"360p": 0, "480p": 1, "720p": 2, "1080p": 3, "2160p": 4, "4k": 4}
 
 # How many variants to return to the user (top N after dedup+sort).
-# Raised from 10 to 15 so that diverse dubbing/language options are visible.
 _MAX_RESULTS = 15
+
+# === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+# Minimum quality tier for torrent variants — only 1080p and above are shown.
+# Online streaming variants (Rezka/Kinogo/etc.) are always kept regardless.
+_MIN_TORRENT_QUALITY_RANK = 3  # 3 = "1080p" in _QUALITY_ORDER
+
+# Max torrent variants per quality tier (1080p, 2160p) — top by seeders.
+_MAX_PER_QUALITY_TIER = 2
 
 # Source keys for online (instant-play) providers.
 _ONLINE_SOURCES = frozenset({"rezka", "kinogo", "videocdn", "kodik"})
@@ -420,6 +427,37 @@ async def get_variants(
         )
 
     deduped.sort(key=_sort_key, reverse=True)
+
+    # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    # Quality filter for torrent variants: remove 720p and below; keep at most
+    # _MAX_PER_QUALITY_TIER variants per quality tier (1080p / 2160p).
+    # Online streaming variants (rezka/kinogo/etc.) are always kept unchanged.
+    tier_counts: dict[str, int] = {}
+    quality_filtered: list[Variant] = []
+    for v in deduped:
+        if v.source in _ONLINE_SOURCES or not v.magnet:
+            # Always keep online variants (no quality filter)
+            quality_filtered.append(v)
+        else:
+            q_rank = _quality_rank(v.quality)
+            if q_rank < _MIN_TORRENT_QUALITY_RANK:
+                # Skip 720p and below for torrent variants
+                continue
+            # Normalise quality key (treat "4k" same as "2160p")
+            q_key = "2160p" if v.quality.lower() in ("4k", "uhd", "2160p") else v.quality.lower()
+            count = tier_counts.get(q_key, 0)
+            if count < _MAX_PER_QUALITY_TIER:
+                tier_counts[q_key] = count + 1
+                quality_filtered.append(v)
+
+    # Fall back to unfiltered list only when quality filter wipes everything
+    if quality_filtered:
+        deduped = quality_filtered
+    else:
+        logger.info(
+            "[Easy-Mod][Variants] quality filter kept 0 results — skipping filter for title=%s",
+            title,
+        )
 
     # Return top _MAX_RESULTS variants by seeders.
     # MAX_VARIANTS (from jackett.py) is used as the provider-level fetch cap.

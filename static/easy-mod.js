@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '6.2';
+    var VERSION = '6.3';
     var API_DEFAULT = 'http://46.225.222.255:8000';
     var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
 
@@ -594,6 +594,47 @@
             '</div>';
     }
 
+    // -------------------------------------------------------
+    // Navigation helper
+    // Registers a named Lampa controller scoped to `render` so that
+    // ALL .selector elements inside it are reachable via keyboard/remote.
+    // This is the standard pattern for custom Lampa plugins — 
+    // Lampa.Controller.toggle('content') only works for Lampa's own built-in
+    // components; custom plugins need collectionSet to scope navigation.
+    // -------------------------------------------------------
+    var _navCtrlId = 0;
+    function activateLampaNav(render, onBack) {
+        // Use timestamp + counter for a collision-resistant controller name
+        var ctrlName = 'easy_mod_nav_' + Date.now() + '_' + (++_navCtrlId);
+        try {
+            Lampa.Controller.add(ctrlName, {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(render);
+                    Lampa.Controller.collectionFocus(false, render);
+                },
+                right:  function () { Lampa.Controller.collectionShift('right'); },
+                left:   function () { Lampa.Controller.collectionShift('left'); },
+                up:     function () { Lampa.Controller.collectionShift('up'); },
+                down:   function () { Lampa.Controller.collectionShift('down'); },
+                enter:  function () { Lampa.Controller.collectionEnter(); },
+                back:   function () {
+                    if (onBack) {
+                        try { onBack(); } catch (e) { log('activateLampaNav onBack error:', e.message); }
+                    } else {
+                        try { Lampa.Activity.backward(); } catch (e) {
+                            log('activateLampaNav backward error:', e.message);
+                            try { Lampa.Activity.back(); } catch (e2) { log('activateLampaNav back error:', e2.message); }
+                        }
+                    }
+                }
+            });
+            Lampa.Controller.toggle(ctrlName);
+        } catch (e) {
+            log('activateLampaNav error (fallback):', e.message);
+            try { Lampa.Controller.toggle('content'); } catch (e2) { log('activateLampaNav fallback error:', e2.message); }
+        }
+    }
+
     // ==================================================================
     // Component: easy_mod_variants
     // ==================================================================
@@ -731,7 +772,7 @@
                 '<div class="online-empty__time">\u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0443 \u0444\u0438\u043b\u044c\u043c\u0430 \u0432 Lampa \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435</div>' +
                 '</div>'
             );
-            try { Lampa.Controller.toggle('content'); } catch (e) {}
+            try { activateLampaNav(self._render); } catch (e) {}
             return;
         }
 
@@ -799,7 +840,7 @@
         self._render.append(spinnerWrap);
 
         // Enable keyboard/remote navigation so filter buttons are reachable during loading
-        setTimeout(function () { try { Lampa.Controller.toggle('content'); } catch (e) { log('toggle content (loading):', e.message); } }, 50);
+        setTimeout(function () { activateLampaNav(self._render); }, 50);
 
         var params = {};
         if (title) { params.title = title; }
@@ -1085,37 +1126,21 @@
                 emptyMsg  = '\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e';
                 emptyHint = '<div class="online-empty__time">\u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435 \u0438\u043b\u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a</div>';
             }
-            // Wrap in scroll so all .selector elements (source/filter buttons) are
-            // keyboard/remote navigable — same pattern as the non-empty results path.
-            try {
-                var emptyScroll = new Lampa.Scroll({ mask: true, over: true });
-                emptyScroll.render().addClass('layer--wheight');
-                emptyScroll.body().append(srcSel2);
-                if (trBar) { emptyScroll.body().append(trBar); }
-                if (filterBar) { emptyScroll.body().append(filterBar); }
-                emptyScroll.body().append(
-                    jq('<div class="online-empty" style="padding:1em 0">').html(
-                        '<div class="online-empty__title">' + emptyMsg + '</div>' + emptyHint
-                    )
-                );
-                self._render.append(emptyScroll.render());
-                emptyScroll.start();
-                self._scroll = emptyScroll;
-            } catch (e) {
-                log('Lampa.Scroll error (empty state):', e.message);
-                self._render.append(srcSel2);
-                if (trBar) { self._render.append(trBar); }
-                if (filterBar) { self._render.append(filterBar); }
-                self._render.append(
-                    '<div class="online-empty" style="padding:1em 0">' +
-                    '<div class="online-empty__title">' + emptyMsg + '</div>' +
-                    emptyHint +
-                    '</div>'
-                );
-            }
-            // Delay toggle so the browser finishes layout before the navigator
-            // computes element positions — prevents focus landing on wrong item.
-            setTimeout(function () { try { Lampa.Controller.toggle('content'); } catch (e) {} }, 100);
+            // Show source selector + empty message with filter buttons visible at top.
+            // Filter buttons are direct children of self._render (NOT inside a Lampa.Scroll)
+            // so they never get hidden by the scroll's mask gradient.
+            self._render.append(srcSel2);
+            if (trBar) { self._render.append(trBar); }
+            if (filterBar) { self._render.append(filterBar); }
+            self._render.append(
+                '<div class="online-empty" style="padding:1em 0">' +
+                '<div class="online-empty__title">' + emptyMsg + '</div>' +
+                emptyHint +
+                '</div>'
+            );
+            // activateLampaNav scopes navigation to self._render so source/filter buttons
+            // are reachable via keyboard/remote even in the empty state.
+            setTimeout(function () { activateLampaNav(self._render); }, 100);
             return;
         }
 
@@ -1128,19 +1153,19 @@
             );
         }
 
-        // 2+3. All content (source selector + filter bar + cards) inside ONE Lampa.Scroll
-        // so ALL .selector elements are reachable via keyboard/remote navigation.
-        // Previously the filter bar was placed outside the scroll which caused it to
-        // visually disappear and made keyboard/remote navigation inside easy-mod non-functional.
+        // 2. Source selector + filter bar as DIRECT children of self._render (OUTSIDE scroll).
+        // This keeps them always visible at the top — placing them inside a Lampa.Scroll with
+        // mask:true hides them under the scroll's top-gradient mask.
+        // Navigation across both filter buttons AND cards is handled by activateLampaNav below,
+        // which uses collectionSet(self._render) to scope to the whole render tree.
+        self._render.append(srcSel2);
+        if (trBar) { self._render.append(trBar); }
+        if (filterBar) { self._render.append(filterBar); }
+
+        // 3. Cards inside Lampa.Scroll for scrolling behaviour.
         try {
             var sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
-
-            // Source selector + filter bar INSIDE the scroll body so they are always
-            // visible and reachable by keyboard/remote navigation arrows.
-            sc.body().append(srcSel2);
-            if (trBar) { sc.body().append(trBar); }
-            if (filterBar) { sc.body().append(filterBar); }
 
             // ── Online sources section ──────────────────────────────────────────
             if (shownOnline.length > 0) {
@@ -1171,11 +1196,8 @@
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
-            // Fallback: flat layout without scroll
+            // Fallback: flat layout without scroll (filter buttons already appended above)
             var list = jq('<div style="padding:0 1em">');
-            list.append(srcSel2);
-            if (trBar) { list.append(trBar); }
-            if (filterBar) { list.append(filterBar); }
             if (shownOnline.length > 0) {
                 if (shownTorrents.length > 0) { list.append(buildSectionHeader(_HEADER_ONLINE)); }
                 for (var i2 = 0; i2 < shownOnline.length; i2++) {
@@ -1195,10 +1217,12 @@
             self._render.append(list);
         }
 
-        // Delay toggle so the browser finishes layout before the navigator
-        // computes element positions — this ensures all .selector items
-        // (filter buttons + cards) have valid getBoundingClientRects.
-        setTimeout(function () { try { Lampa.Controller.toggle('content'); } catch (e) {} }, 100);
+        // activateLampaNav registers a named controller that uses collectionSet(self._render)
+        // to scope navigation to ALL .selector elements in self._render — this covers both
+        // filter buttons (outside scroll) and cards (inside scroll body).
+        // This is the correct pattern for custom Lampa plugins vs toggle('content') which
+        // only works for Lampa's own built-in components.
+        setTimeout(function () { activateLampaNav(self._render); }, 100);
     };
 
     EasyModVariants.prototype._startStream = function (variant) {
@@ -1320,9 +1344,9 @@
             }
         });
 
-        // Activate Lampa's content controller so the back button (and any other
-        // .selector elements) can be reached via remote-control / keyboard arrows.
-        try { Lampa.Controller.toggle('content'); } catch (e) {}
+        // Activate navigation scoped to self._render so the back button and any other
+        // .selector elements are reachable via keyboard/remote arrows.
+        activateLampaNav(self._render);
 
         self._poll();
     };
@@ -1548,7 +1572,7 @@
         }
         wrap.append(listEl);
         self._render.append(wrap);
-        try { Lampa.Controller.toggle('content'); } catch (e) {}
+        activateLampaNav(self._render);
     };
 
     EasyModWait.prototype._showError = function (msg) {
@@ -1576,7 +1600,7 @@
                     try { Lampa.Activity.back(); } catch (e2) {}
                 }
             });
-            try { Lampa.Controller.toggle('content'); } catch (e) {}
+            activateLampaNav(self._render);
         } catch (e) {}
     };
 

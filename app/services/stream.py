@@ -83,9 +83,16 @@ def _pick_video_file(files: list[dict]) -> dict | None:
     return max(best_pool, key=lambda f: int(f.get("size", 0) or 0), default=None)
 
 
-def _magnet_hash(magnet: str) -> str:
-    """SHA-1 hex digest of the raw magnet string."""
-    return hashlib.sha1(magnet.encode()).hexdigest()
+def _magnet_hash(magnet: str, season: Optional[int] = None, episode: Optional[int] = None) -> str:
+    """SHA-1 hex digest of the magnet string + season/episode.
+
+    Including season/episode ensures that two requests for different episodes
+    of the same season-pack torrent (same magnet) get separate cache entries
+    and separate dedup keys, preventing one episode's cached file_id from being
+    returned for a different episode.
+    """
+    key = f"{magnet}:{season or 0}:{episode or 0}"
+    return hashlib.sha1(key.encode()).hexdigest()
 
 
 def _extract_infohash(magnet: str) -> Optional[str]:
@@ -212,17 +219,31 @@ async def _load_job(job_id: str) -> Optional[StreamJob]:
         return None
 
 
-async def _save_torrent_meta(magnet_hash: str, magnet: str, torrent_id: str, file_id: str) -> None:
+async def _save_torrent_meta(
+    magnet_hash: str,
+    magnet: str,
+    torrent_id: str,
+    file_id: str,
+    episode: Optional[int] = None,
+) -> None:
     """
     Persist torrent_id:file_id to cache so future requests can obtain a fresh CDN URL
     via request_download_link instead of re-using an expiring direct CDN URL.
+
+    When ``episode`` is set (episode-specific play), the infohash-based cache key is
+    intentionally skipped.  The infohash key is shared across all episodes of the same
+    torrent; writing a per-episode file_id to it would cause subsequent plays of other
+    episodes to receive the wrong file from the cache.
     """
     meta = f"{torrent_id}:{file_id}"
     await direct_url_cache.aset(magnet_hash, meta)
-    infohash = _extract_infohash(magnet)
-    if infohash:
-        await direct_url_cache.aset(infohash, meta)
-        logger.debug("[Easy-Mod][Stream] torrent_meta cached by infohash=%s", infohash)
+    if not episode:
+        # Only index by infohash for non-episode-specific plays (movies / full seasons).
+        # Episode-specific plays use the episode-aware magnet_hash key above.
+        infohash = _extract_infohash(magnet)
+        if infohash:
+            await direct_url_cache.aset(infohash, meta)
+            logger.debug("[Easy-Mod][Stream] torrent_meta cached by infohash=%s", infohash)
 
 
 async def _update_job(job_id: str, **kwargs) -> Optional[StreamJob]:
@@ -270,15 +291,23 @@ async def create_job(req: StreamStartRequest) -> StreamJob:
       2. magnet_job dedup → return existing in-flight/done job
       3. Create new job, persist, launch background polling
     """
-    mhash = _magnet_hash(req.magnet)
+    # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+    # Include season+episode in the hash so that requests for different episodes of
+    # the same season-pack torrent get separate cache entries.  Without this, playing
+    # S02E01 would save file_id_E01 to the cache, and a later request for S02E05
+    # (same magnet, same hash) would receive S02E01's stale file_id from the cache.
+    mhash = _magnet_hash(req.magnet, req.season, req.episode)
 
     # ── 1. Torrent metadata already cached ────────────────────────────────
     # The cache stores "torrent_id:file_id" (new format) which lets us obtain
     # a fresh CDN URL on every request — avoiding 404s from expired CDN links.
     # Old format entries (raw CDN URLs starting with "http") are ignored.
     cached_meta = await direct_url_cache.aget(mhash)
-    if not cached_meta:
-        # Also try by infohash (legacy key from previous implementation)
+    if not cached_meta and not req.episode:
+        # Fall back to infohash key only when no specific episode is requested.
+        # The infohash key is shared across all episodes of the same torrent;
+        # using it for episode-specific requests would return the wrong file_id
+        # (set from a different episode's prior play of the same season pack).
         infohash = _extract_infohash(req.magnet)
         if infohash:
             cached_meta = await direct_url_cache.aget(infohash)
@@ -434,8 +463,8 @@ async def _process_job(job_id: str) -> None:
                                 )
                                 direct_url = None
                             if direct_url:
-                                mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                                await _save_torrent_meta(mhash, job.magnet, existing_torrent_id, str(file_id))
+                                mhash = job.magnet_hash or _magnet_hash(job.magnet, job.season, job.episode)
+                                await _save_torrent_meta(mhash, job.magnet, existing_torrent_id, str(file_id), episode=job.episode)
                                 await _update_job(
                                     job_id,
                                     torrent_id=existing_torrent_id,
@@ -583,8 +612,8 @@ async def _process_job(job_id: str) -> None:
                                 )
                                 dl_url = None
                             if dl_url:
-                                mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                                await _save_torrent_meta(mhash, job.magnet, torrent_id, str(fid))
+                                mhash = job.magnet_hash or _magnet_hash(job.magnet, job.season, job.episode)
+                                await _save_torrent_meta(mhash, job.magnet, torrent_id, str(fid), episode=job.episode)
                                 await _update_job(
                                     job_id,
                                     torrent_id=torrent_id,
@@ -701,8 +730,8 @@ async def _process_job(job_id: str) -> None:
                         direct_url = None
 
                     if direct_url:
-                        mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                        await _save_torrent_meta(mhash, job.magnet, torrent_id, str(file_id))
+                        mhash = job.magnet_hash or _magnet_hash(job.magnet, job.season, job.episode)
+                        await _save_torrent_meta(mhash, job.magnet, torrent_id, str(file_id), episode=job.episode)
                         await _update_job(
                             job_id,
                             torrent_id=torrent_id,

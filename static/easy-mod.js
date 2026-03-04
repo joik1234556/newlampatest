@@ -1296,7 +1296,26 @@
 
                 // Cache hit — instant play
                 if (status === 'ready' && (resp.proxy_url || resp.direct_url)) {
-                    playDirect(resp.proxy_url ? (getApi() + resp.proxy_url) : resp.direct_url, m);
+                    // === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+                    // For TV series without a specific episode selected, route through
+                    // EasyModWait so that season-pack torrents show the episode picker.
+                    // When a specific episode is already selected (filterEpisode > 0), the
+                    // backend already resolved the correct file — play directly.
+                    if (jobId && self._isSeries && self._filterEpisode === 0) {
+                        try {
+                            Lampa.Activity.push({
+                                component: 'easy_mod_wait',
+                                title:     'Easy-Mod \u2014 \u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430',
+                                job_id:    jobId,
+                                movie:     m,
+                                variant:   variant,
+                                season:    self._filterSeason  || 0,
+                                episode:   0,
+                            });
+                        } catch (e) { log('push wait error', e.message); }
+                    } else {
+                        playDirect(resp.proxy_url ? (getApi() + resp.proxy_url) : resp.direct_url, m);
+                    }
                     return;
                 }
                 if (!jobId) {

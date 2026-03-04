@@ -54,7 +54,7 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Cache TTL settings (seconds)
 VARIANTS_CACHE_TTL: int = int(os.getenv("VARIANTS_CACHE_TTL", "1800"))    # 30 min
-DIRECT_URL_CACHE_TTL: int = int(os.getenv("DIRECT_URL_CACHE_TTL", "7200"))  # 2 hours
+DIRECT_URL_CACHE_TTL: int = int(os.getenv("DIRECT_URL_CACHE_TTL", "3600"))  # 1 hour (TorBox URLs expire ~1 h)
 JOB_TTL: int = int(os.getenv("JOB_TTL", "7200"))                           # 2 hours
 
 # TorBox polling strategy

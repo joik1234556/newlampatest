@@ -598,11 +598,38 @@
     // Navigation helper
     // Registers a named Lampa controller scoped to `render` so that
     // ALL .selector elements inside it are reachable via keyboard/remote.
-    // This is the standard pattern for custom Lampa plugins — 
-    // Lampa.Controller.toggle('content') only works for Lampa's own built-in
-    // components; custom plugins need collectionSet to scope navigation.
+    // Lampa.Controller.collectionShift was added in newer Lampa builds;
+    // on older builds we fall back to manual focus management via jQuery.
     // -------------------------------------------------------
     var _navCtrlId = 0;
+    function _collectionShiftFallback(render, direction) {
+        var selectors = render.find('.selector');
+        if (!selectors.length) { return; }
+        var current = selectors.filter('.selected');
+        var idx = current.length ? selectors.index(current) : -1;
+        var next = idx;
+        if (direction === 'down' || direction === 'right') {
+            next = (idx + 1 < selectors.length) ? idx + 1 : idx;
+        } else if (direction === 'up' || direction === 'left') {
+            next = (idx > 0) ? idx - 1 : 0;
+        }
+        if (next !== idx || idx === -1) {
+            var el = selectors.eq(next < 0 ? 0 : next);
+            selectors.removeClass('selected');
+            el.addClass('selected');
+            try { Lampa.Controller.collectionFocus(el[0], render); } catch (e) {
+                log('collectionFocus failed, using native focus:', e.message);
+                el.focus();
+            }
+        }
+    }
+    function _doShift(render, direction) {
+        if (typeof Lampa.Controller.collectionShift === 'function') {
+            Lampa.Controller.collectionShift(direction);
+        } else {
+            _collectionShiftFallback(render, direction);
+        }
+    }
     function activateLampaNav(render, onBack) {
         // Use timestamp + counter for a collision-resistant controller name
         var ctrlName = 'easy_mod_nav_' + Date.now() + '_' + (++_navCtrlId);
@@ -612,10 +639,10 @@
                     Lampa.Controller.collectionSet(render);
                     Lampa.Controller.collectionFocus(false, render);
                 },
-                right:  function () { Lampa.Controller.collectionShift('right'); },
-                left:   function () { Lampa.Controller.collectionShift('left'); },
-                up:     function () { Lampa.Controller.collectionShift('up'); },
-                down:   function () { Lampa.Controller.collectionShift('down'); },
+                right:  function () { _doShift(render, 'right'); },
+                left:   function () { _doShift(render, 'left'); },
+                up:     function () { _doShift(render, 'up'); },
+                down:   function () { _doShift(render, 'down'); },
                 enter:  function () { Lampa.Controller.collectionEnter(); },
                 back:   function () {
                     if (onBack) {

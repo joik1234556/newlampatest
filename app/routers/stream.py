@@ -468,6 +468,7 @@ async def stream_proxy(
     # expiry causes the player to report "video not found or corrupted".
     play_url = job.direct_url
     if job.torrent_id and job.file_id:
+        # Common case: job was processed normally — refresh using stored ids.
         try:
             fresh_url = await torbox.request_download_link(job.torrent_id, job.file_id)
             if fresh_url:
@@ -477,6 +478,34 @@ async def stream_proxy(
                 "[proxy] failed to refresh TorBox URL (%s: %s), falling back to cached url",
                 type(exc).__name__, exc,
             )
+    elif job.magnet:
+        # Cache-hit job: only direct_url was stored (no torrent_id/file_id).
+        # Look up the torrent by infohash to get a fresh, non-expired URL.
+        _ih = stream_svc._extract_infohash(job.magnet)
+        if _ih:
+            try:
+                _torrent = await torbox.get_torrent_by_hash(_ih)
+                if _torrent:
+                    _tid = str(_torrent.get("id"))
+                    _files = _torrent.get("files") or []
+                    _best = stream_svc._pick_video_file_for_episode(_files, job.episode, job.season)
+                    _fid = _best.get("id") if _best else None
+                    if _tid and _fid is not None:
+                        _fresh = await torbox.request_download_link(_tid, _fid)
+                        if _fresh:
+                            play_url = _fresh
+                            # Persist so future calls skip this lookup
+                            await stream_svc._update_job(
+                                job_id.strip(),
+                                torrent_id=_tid,
+                                file_id=str(_fid),
+                                direct_url=_fresh,
+                            )
+            except Exception as exc:
+                logger.warning(
+                    "[proxy] cache-hit infohash refresh failed (%s: %s), using stored url",
+                    type(exc).__name__, exc,
+                )
 
     if not play_url:
         raise HTTPException(status_code=409, detail="No direct URL available for this job yet")

@@ -159,10 +159,18 @@ async def request_download_link(torrent_id: int | str, file_id: int | str) -> st
 async def check_cached(infohash: str) -> bool:
     """Check whether a torrent is already cached in TorBox."""
     try:
-        result = await _get("/torrents/checkcached", params={"infohash": infohash})
-        data = result.get("data", {})
+        result = await _get(
+            "/torrents/checkcached",
+            params={"hash": infohash.lower(), "format": "list"},
+        )
+        data = result.get("data") or []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and item.get("hash", "").lower() == infohash.lower():
+                    return bool(item.get("cached"))
+            return False
         if isinstance(data, dict):
-            return data.get(infohash, False)
+            return bool(data.get(infohash.lower(), False))
         return bool(data)
     except Exception as exc:
         logger.warning("TorBox checkcached error: %s", exc)
@@ -173,7 +181,7 @@ async def batch_check_cached(infohashes: list[str]) -> dict[str, bool]:
     """
     Batch-check whether torrents are already cached in TorBox.
 
-    Sends a single POST request with a comma-separated list of infohashes.
+    Sends a single GET request with a comma-separated list of infohashes.
     Returns a dict {infohash_lower → bool}.
 
     Falls back to all-False on any error so callers can continue normally.
@@ -184,9 +192,9 @@ async def batch_check_cached(infohashes: list[str]) -> dict[str, bool]:
         return {}
     try:
         hashes_csv = ",".join(h.lower() for h in infohashes if h)
-        resp = await _client().post(
+        resp = await _client().get(
             f"{TORBOX_BASE_URL}/torrents/checkcached",
-            json={"torrent_hashes": hashes_csv},
+            params={"hash": hashes_csv, "format": "list"},
         )
         if not resp.is_success:
             logger.warning("TorBox batch_check_cached status=%d", resp.status_code)

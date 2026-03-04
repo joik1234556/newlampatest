@@ -1199,8 +1199,9 @@
         if (filterBar) { self._render.append(filterBar); }
 
         // 3. Cards inside Lampa.Scroll for scrolling behaviour.
+        var sc;
         try {
-            var sc = new Lampa.Scroll({ mask: true, over: true });
+            sc = new Lampa.Scroll({ mask: true, over: true });
             sc.render().addClass('layer--wheight');
 
             // ── Online sources section ──────────────────────────────────────────
@@ -1227,11 +1228,15 @@
                 sc.body().append(torrentSec);
             }
 
+            // Append render first so sc.body() content is in DOM; guard start() for
+            // Lampa versions where the method was renamed or removed.
             self._render.append(sc.render());
-            sc.start();
+            if (typeof sc.start === 'function') { sc.start(); }
             self._scroll = sc;
         } catch (scrollErr) {
             log('Lampa.Scroll error:', scrollErr.message);
+            // Remove the partially-initialised scroll to avoid duplicate cards
+            try { if (sc && sc.render) { sc.render().remove(); } } catch (e) {}
             // Fallback: flat layout without scroll (filter buttons already appended above)
             var list = jq('<div style="padding:0 1em">');
             if (shownOnline.length > 0) {

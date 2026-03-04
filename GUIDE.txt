@@ -414,6 +414,8 @@ TorBox напрямую
 Следующий порядок действий гарантирует, что все изменения из репозитория
 (код, плагин, зависимости) вступят в силу без лишней остановки сервисов.
 
+Рабочая ветка проекта: copilot/connect-plugin-to-backend
+
 ──────────────────────────────────────────────────────────────────────────────
 ВАРИАНТ А — Docker Compose (рекомендуется)
 ──────────────────────────────────────────────────────────────────────────────
@@ -421,10 +423,14 @@ TorBox напрямую
   Выполните на сервере:
 
     # 1. Перейдите в папку проекта
-    cd /путь/к/newlampatest
+    cd /root/newlampatest
 
-    # 2. Получите последние изменения из репозитория
-    git pull
+    # 2. Сохраните локальные правки (если есть), получите обновления
+    git stash -u || true
+    git fetch --all --prune
+    git checkout copilot/connect-plugin-to-backend
+    git pull --ff-only origin copilot/connect-plugin-to-backend
+    git stash pop || true   # вернуть локальные правки (если были)
 
     # 3. Пересоберите образ бэкенда (обновляет Python-зависимости
     #    и копирует новый код / плагин внутрь контейнера)
@@ -435,6 +441,7 @@ TorBox напрямую
     docker compose up -d --no-deps backend
 
     # 5. Убедитесь, что бэкенд поднялся без ошибок
+    docker compose ps
     docker compose logs -f backend
 
   ✅ Всё — обновление применено. Новая версия плагина easy-mod.js
@@ -449,14 +456,18 @@ TorBox напрямую
 ──────────────────────────────────────────────────────────────────────────────
 
   # 1. Перейдите в папку проекта
-  cd /путь/к/newlampatest
+  cd /root/newlampatest
 
-  # 2. Получите последние изменения
-  git pull
+  # 2. Получите последние изменения (та же схема, что и в варианте А)
+  git stash -u || true
+  git fetch --all --prune
+  git checkout copilot/connect-plugin-to-backend
+  git pull --ff-only origin copilot/connect-plugin-to-backend
+  git stash pop || true
 
   # 3. Остановите текущий процесс сервера
-  #    Найти PID: pgrep -f "uvicorn app.main"
-  kill $(pgrep -f "uvicorn app.main")
+  #    Найти PID: pgrep -f "gunicorn\|uvicorn app.main"
+  kill $(pgrep -f "gunicorn") 2>/dev/null || kill $(pgrep -f "uvicorn app.main") 2>/dev/null || true
 
   # 4. Активируйте виртуальное окружение
   source .venv/bin/activate
@@ -465,7 +476,7 @@ TorBox напрямую
   pip install -q -r requirements.txt
 
   # 6. Запустите сервер заново
-  ./run.sh            # 2 воркера (продакшн)
+  ./run.sh            # 4 воркера (продакшн, оптимизировано под 2-ядерный сервер)
 
 ──────────────────────────────────────────────────────────────────────────────
 ПОЛНОЕ ПЕРЕСОЗДАНИЕ (если что-то пошло не так)

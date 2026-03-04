@@ -400,6 +400,7 @@ async def _process_job(job_id: str) -> None:
                                 await _update_job(
                                     job_id,
                                     torrent_id=existing_torrent_id,
+                                    file_id=str(file_id),
                                     state="ready",
                                     progress=1.0,
                                     direct_url=direct_url,
@@ -548,6 +549,7 @@ async def _process_job(job_id: str) -> None:
                                 await _update_job(
                                     job_id,
                                     torrent_id=torrent_id,
+                                    file_id=str(fid),
                                     state="ready",
                                     progress=1.0,
                                     direct_url=dl_url,
@@ -664,6 +666,8 @@ async def _process_job(job_id: str) -> None:
                         await _save_direct_url(mhash, job.magnet, direct_url)
                         await _update_job(
                             job_id,
+                            torrent_id=torrent_id,
+                            file_id=str(file_id),
                             state="ready",
                             progress=1.0,
                             direct_url=direct_url,

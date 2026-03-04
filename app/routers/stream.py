@@ -460,14 +460,32 @@ async def stream_proxy(
     job = stream_svc.get_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    if not job.direct_url:
+    if not job.direct_url and not (job.torrent_id and job.file_id):
         raise HTTPException(status_code=409, detail="No direct URL available for this job yet")
 
-    if not _is_safe_proxy_url(job.direct_url):
-        logger.error("[proxy] unsafe scheme in stored direct_url: %s", urlparse(job.direct_url).scheme)
+    # Always fetch a fresh URL from TorBox to avoid serving expired CDN links.
+    # TorBox direct download URLs are time-limited; using a cached URL after
+    # expiry causes the player to report "video not found or corrupted".
+    play_url = job.direct_url
+    if job.torrent_id and job.file_id:
+        try:
+            fresh_url = await torbox.request_download_link(job.torrent_id, job.file_id)
+            if fresh_url:
+                play_url = fresh_url
+        except Exception as exc:
+            logger.warning(
+                "[proxy] failed to refresh TorBox URL (%s: %s), falling back to cached url",
+                type(exc).__name__, exc,
+            )
+
+    if not play_url:
+        raise HTTPException(status_code=409, detail="No direct URL available for this job yet")
+
+    if not _is_safe_proxy_url(play_url):
+        logger.error("[proxy] unsafe scheme in url: %s", urlparse(play_url).scheme)
         raise HTTPException(status_code=500, detail="Stored URL uses an unsupported scheme")
 
-    return await _proxy_url(request, job.direct_url)
+    return await _proxy_url(request, play_url)
 
 
 @router.get("/proxy_file")

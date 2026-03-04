@@ -59,6 +59,7 @@ class StreamJob(BaseModel):
     progress: float = 0.0
     direct_url: Optional[str] = None
     torrent_id: Optional[str] = None
+    file_id: Optional[str] = None  # TorBox file ID used to generate direct_url (for URL refresh)
     message: str = ""
     # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
     season: Optional[int] = None   # requested TV season (for episode-specific file picking)

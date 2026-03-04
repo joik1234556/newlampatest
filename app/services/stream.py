@@ -238,82 +238,89 @@ async def _process_job(job_id: str) -> None:
         return
 
     try:
-        # ── Fast path A: check if TorBox already has this torrent ────────
-        # This handles: (a) re-opened film after server restart,
-        # (b) user opens same film twice while first job still running.
+        # ── Fast path A + B: parallel check — mylist AND global cache ────
+        # Run both checks concurrently to save one network round-trip.
+        # Fast Path A: is the torrent already in the user's mylist (seeding or
+        #   even downloading)?  If yes and ready → serve directly, no add_magnet.
+        # Fast Path B: is the infohash in TorBox's global cache?  If yes the
+        #   torrent will enter "seeding" state immediately after add_magnet.
         is_torrent_url = job.magnet.startswith("http://") or job.magnet.startswith("https://")
         existing_torrent_id: Optional[str] = None
+        _is_globally_cached = False
+
         if not is_torrent_url:
             infohash = _extract_infohash(job.magnet)
             if infohash:
-                try:
-                    # bypass_cache=True: force TorBox to return a fresh response
-                    # including the files list for the torrent.  Without this,
-                    # TorBox may serve a stale cached response where files=[],
-                    # which would prevent Fast Path A from getting a download link
-                    # for an already-seeding torrent.
-                    existing = await torbox.get_torrent_by_hash(infohash, bypass_cache=True)
-                    if existing:
-                        existing_torrent_id = str(existing.get("id"))
-                        ex_state = existing.get("download_state", "")
-                        ex_files = existing.get("files") or []
-                        logger.info(
-                            "[Easy-Mod][TorBox] found existing torrent torrent_id=%s "
-                            "state=%s files=%d job_id=%s",
-                            existing_torrent_id, ex_state, len(ex_files), job_id,
-                        )
-                        # If already seeding/completed and files are listed, get link now
-                        _READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
-                        if ex_state in _READY_STATES and ex_files:
-                            best_file = _pick_video_file(ex_files)
-                            file_id = best_file.get("id") if best_file else None
-                            if file_id is not None:
-                                try:
-                                    direct_url = await torbox.request_download_link(
-                                        existing_torrent_id, file_id
-                                    )
-                                except Exception as exc:
-                                    logger.warning(
-                                        "[Easy-Mod][TorBox] fast-path requestdl error: %s", exc
-                                    )
-                                    direct_url = None
-                                if direct_url:
-                                    mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                                    await _save_direct_url(mhash, job.magnet, direct_url)
-                                    await _update_job(
-                                        job_id,
-                                        torrent_id=existing_torrent_id,
-                                        state="ready",
-                                        progress=1.0,
-                                        direct_url=direct_url,
-                                        message="",
-                                    )
-                                    logger.info(
-                                        "[Easy-Mod][TorBox] fast-path ready job_id=%s url=%.80s",
-                                        job_id, direct_url,
-                                    )
-                                    return
-                except Exception as exc:
-                    logger.warning("[Easy-Mod][TorBox] fast-path lookup error: %s", exc)
+                # Both calls go to TorBox simultaneously — saves ~300 ms compared
+                # to the previous sequential A-then-B approach.
+                # return_exceptions=True means task exceptions are returned as values,
+                # not re-raised, so no try/except wrapper is needed here.
+                _pa_result, _pb_result = await asyncio.gather(
+                    torbox.get_torrent_by_hash(infohash, bypass_cache=True),
+                    torbox.check_cached(infohash),
+                    return_exceptions=True,
+                )
 
-        # ── Fast path B: TorBox global cache check (checkcached) ─────────
-        # If TorBox has this infohash in its global cache (not necessarily the
-        # user's mylist), adding the magnet returns a torrent that is immediately
-        # in "seeding"/"cached" state — no download required.
-        # We do a pre-flight check so we can skip the polling loop entirely.
-        _is_globally_cached = False
-        if not is_torrent_url and not existing_torrent_id:
-            _ih = _extract_infohash(job.magnet)
-            if _ih:
-                try:
-                    _is_globally_cached = await torbox.check_cached(_ih)
+                # ── Process Fast Path A result ────────────────────────────
+                existing = _pa_result if not isinstance(_pa_result, BaseException) else None
+                if existing:
+                    existing_torrent_id = str(existing.get("id"))
+                    ex_state = existing.get("download_state", "")
+                    ex_files = existing.get("files") or []
+                    logger.info(
+                        "[Easy-Mod][TorBox] found existing torrent torrent_id=%s "
+                        "state=%s files=%d job_id=%s",
+                        existing_torrent_id, ex_state, len(ex_files), job_id,
+                    )
+                    # If already seeding/completed and files are listed, get link now
+                    _READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
+                    if ex_state in _READY_STATES and ex_files:
+                        best_file = _pick_video_file(ex_files)
+                        file_id = best_file.get("id") if best_file else None
+                        if file_id is not None:
+                            try:
+                                direct_url = await torbox.request_download_link(
+                                    existing_torrent_id, file_id
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "[Easy-Mod][TorBox] fast-path requestdl error: %s", exc
+                                )
+                                direct_url = None
+                            if direct_url:
+                                mhash = job.magnet_hash or _magnet_hash(job.magnet)
+                                await _save_direct_url(mhash, job.magnet, direct_url)
+                                await _update_job(
+                                    job_id,
+                                    torrent_id=existing_torrent_id,
+                                    state="ready",
+                                    progress=1.0,
+                                    direct_url=direct_url,
+                                    message="",
+                                )
+                                logger.info(
+                                    "[Easy-Mod][TorBox] fast-path ready job_id=%s url=%.80s",
+                                    job_id, direct_url,
+                                )
+                                return
+                elif isinstance(_pa_result, BaseException):
+                    logger.warning("[Easy-Mod][TorBox] fast-path lookup error: %s", _pa_result)
+
+                # ── Process Fast Path B result ────────────────────────────
+                # Only use the global-cache flag when the torrent is NOT already
+                # in the user's mylist — otherwise _imm_attempts stays at 1.
+                if not existing_torrent_id:
+                    if isinstance(_pb_result, bool):
+                        _is_globally_cached = _pb_result
                     if _is_globally_cached:
                         logger.info(
                             "[Easy-Mod][TorBox] infohash in global cache job_id=%s ih=%s",
-                            job_id, _ih,
+                            job_id, infohash,
                         )
-                except Exception as _exc:
-                    logger.debug("[Easy-Mod][TorBox] checkcached pre-flight error: %s", _exc)
+                    elif isinstance(_pb_result, BaseException):
+                        logger.debug(
+                            "[Easy-Mod][TorBox] checkcached pre-flight error: %s", _pb_result
+                        )
 
         # ── Add magnet or torrent file URL to TorBox ──────────────────────
         logger.info(
@@ -394,13 +401,13 @@ async def _process_job(job_id: str) -> None:
         # state right after add_magnet (no download required). Checking once
         # without sleeping lets the user start watching immediately instead of
         # waiting at least TORBOX_POLL_FAST_INTERVAL seconds.
-        # For globally-cached torrents, retry a few times with a short sleep
+        # For globally-cached torrents, retry several times with a short sleep
         # since TorBox may need a moment to populate the files list.
         _TORBOX_READY_STATES = frozenset(("seeding", "completed", "cached", "ready"))
-        _imm_attempts = 4 if _is_globally_cached else 1
+        _imm_attempts = 6 if _is_globally_cached else 1  # 6 attempts, 5 × 0.5 s = 2.5 s max
         for _imm_try in range(_imm_attempts):
             if _imm_try > 0:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)  # 0.5 s between attempts (was 1 s)
             try:
                 # bypass_cache=True: force TorBox to return a fresh response so we
                 # see the current download_state and the populated files list.
@@ -459,6 +466,10 @@ async def _process_job(job_id: str) -> None:
         # After this many consecutive zero-progress ticks, give up.
         # Breakdown: 15 fast ticks × 2 s = 30 s; 5 slow ticks × 5 s = 25 s → 55 s total.
         _STALL_TICK_LIMIT = 20  # 15 fast + 5 slow ticks ≈ 55 s
+        # Use bypass_cache for the first few polls so TorBox can't serve a stale
+        # list right after add_magnet (happens when the torrent transitions from
+        # "downloading" to "seeding" faster than TorBox's own cache TTL).
+        _bypass_polls_left = 3
 
         while elapsed < TORBOX_POLL_MAX_SECONDS:
             interval = (
@@ -469,8 +480,12 @@ async def _process_job(job_id: str) -> None:
             await asyncio.sleep(interval)
             elapsed += interval
 
+            _use_bypass = _bypass_polls_left > 0
+            if _use_bypass:
+                _bypass_polls_left -= 1
+
             try:
-                torrent = await torbox.get_torrent_by_id(torrent_id)
+                torrent = await torbox.get_torrent_by_id(torrent_id, bypass_cache=_use_bypass)
             except Exception as exc:
                 logger.warning(
                     "[Easy-Mod][TorBox] poll error elapsed=%ds job_id=%s: %s",

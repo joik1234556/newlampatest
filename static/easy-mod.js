@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '6.3';
+    var VERSION = '6.4';
     var API_DEFAULT = 'http://46.225.222.255:8000';
     var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
 
@@ -1317,6 +1317,22 @@
     EasyModWait.prototype.create = function () { return this._render; };
     EasyModWait.prototype.render = function () { return this._render; };
 
+    // Called when the stream is ready to play.
+    // Pops the easy_mod_wait activity off the Lampa stack BEFORE opening the player
+    // so that pressing back inside the player returns to the variant-selection screen
+    // (easy_mod_variants) rather than to this loading/waiting screen.
+    EasyModWait.prototype._playReady = function (url) {
+        var self = this;
+        var m = self._movie || {};
+        // Mark as dead before backward() in case backward() triggers destroy()
+        self._dead = 'playing';
+        clearTimeout(self._timer);
+        try { Lampa.Activity.backward(); } catch (e) {
+            log('_playReady: Lampa.Activity.backward() failed, playing anyway:', e.message);
+        }
+        playDirect(url, m);
+    };
+
     EasyModWait.prototype.start = function () {
         var self = this;
         var m    = self._movie   || {};
@@ -1428,14 +1444,14 @@
             var videoFiles = files.filter(function (f) { return f.is_video; });
             // If only one video file (or none), play the default URL directly
             if (videoFiles.length <= 1) {
-                playDirect(defaultUrl, m);
+                self._playReady(defaultUrl);
                 return;
             }
             // _showFilePicker handles episode matching, auto-play and filtered picker display
             self._showFilePicker(videoFiles, jobId, defaultUrl, m, wantSeason, wantEp);
         }, function () {
             // Error fetching files — fall back to default URL
-            playDirect(defaultUrl, m);
+            self._playReady(defaultUrl);
         });
     };
 
@@ -1519,9 +1535,9 @@
                 if (byEp.length === 1) {
                     // Exactly one match — auto-play without showing the picker
                     apiGet('/stream/play_file', { job_id: jobId, file_id: String(byEp[0].file_id) }, function (resp) {
-                        if (resp && resp.direct_url) { playDirect(resp.direct_url, m); }
-                        else { playDirect(defaultUrl, m); }
-                    }, function () { playDirect(defaultUrl, m); });
+                        if (resp && resp.direct_url) { self._playReady(resp.direct_url); }
+                        else { self._playReady(defaultUrl); }
+                    }, function () { self._playReady(defaultUrl); });
                     return;
                 }
                 filtered = byEp;
@@ -1559,12 +1575,12 @@
                     // Request direct link for the chosen file
                     apiGet('/stream/play_file', { job_id: jobId, file_id: String(f.file_id) }, function (resp) {
                         if (resp && resp.direct_url) {
-                            playDirect(resp.direct_url, m);
+                            self._playReady(resp.direct_url);
                         } else {
-                            playDirect(defaultUrl, m);
+                            self._playReady(defaultUrl);
                         }
                     }, function () {
-                        playDirect(defaultUrl, m);
+                        self._playReady(defaultUrl);
                     });
                 });
                 listEl.append(item);

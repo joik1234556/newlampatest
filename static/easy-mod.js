@@ -4,7 +4,7 @@
     if (window.__easy_mod_loaded) { return; }
     window.__easy_mod_loaded = true;
 
-    var VERSION = '6.4';
+    var VERSION = '6.5';
     var API_DEFAULT = 'http://46.225.222.255:8000';
     var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
 
@@ -1251,8 +1251,8 @@
                 var status = resp && resp.status;
 
                 // Cache hit — instant play
-                if (status === 'ready' && resp.direct_url) {
-                    playDirect(resp.direct_url, m);
+                if (status === 'ready' && (resp.proxy_url || resp.direct_url)) {
+                    playDirect(resp.proxy_url ? (getApi() + resp.proxy_url) : resp.direct_url, m);
                     return;
                 }
                 if (!jobId) {
@@ -1405,12 +1405,15 @@
                     self._render.find('.em-wait__msg').text(msg);
                 } catch (e) {}
 
-                if (state === 'ready' && resp.direct_url) {
+                if (state === 'ready' && (resp.proxy_url || resp.direct_url)) {
                     self._dead = 'playing';
                     clearTimeout(self._timer);
+                    // Use the CORS-safe proxy URL when available so the player
+                    // can seek and the browser doesn't hit TorBox CDN CORS blocks.
+                    var playUrl = resp.proxy_url ? (getApi() + resp.proxy_url) : resp.direct_url;
                     // Check if this torrent has multiple video files (whole-season pack)
                     // If so, show a file picker before playing
-                    self._maybeShowFilePicker(resp.direct_url, self._jobId);
+                    self._maybeShowFilePicker(playUrl, self._jobId);
                     return;
                 }
                 if (state === 'failed') {
@@ -1533,11 +1536,10 @@
                     if (bySeason.length > 0) { byEp = bySeason; }
                 }
                 if (byEp.length === 1) {
-                    // Exactly one match — auto-play without showing the picker
-                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(byEp[0].file_id) }, function (resp) {
-                        if (resp && resp.direct_url) { self._playReady(resp.direct_url); }
-                        else { self._playReady(defaultUrl); }
-                    }, function () { self._playReady(defaultUrl); });
+                    // Exactly one match — auto-play without showing the picker.
+                    // Use /stream/proxy_file so the video is served through our
+                    // CORS-safe server (TorBox CDN URLs can block browser players).
+                    self._playReady(getApi() + '/stream/proxy_file' + qs({ job_id: jobId, file_id: String(byEp[0].file_id) }));
                     return;
                 }
                 filtered = byEp;
@@ -1572,16 +1574,9 @@
                     item.append(jq('<span class="em-file-size">').text(fmtSize(f.size_mb)));
                 }
                 item.on('hover:enter click', function () {
-                    // Request direct link for the chosen file
-                    apiGet('/stream/play_file', { job_id: jobId, file_id: String(f.file_id) }, function (resp) {
-                        if (resp && resp.direct_url) {
-                            self._playReady(resp.direct_url);
-                        } else {
-                            self._playReady(defaultUrl);
-                        }
-                    }, function () {
-                        self._playReady(defaultUrl);
-                    });
+                    // Use /stream/proxy_file so the video routes through our CORS-safe
+                    // server instead of sending the player to a raw TorBox CDN URL.
+                    self._playReady(getApi() + '/stream/proxy_file' + qs({ job_id: jobId, file_id: String(f.file_id) }));
                 });
                 listEl.append(item);
             })(filtered[fi]);

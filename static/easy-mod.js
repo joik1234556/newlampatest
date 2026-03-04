@@ -739,13 +739,16 @@
               (self._filterSeason ? ' \u2022 \u0421\u0435\u0437\u043e\u043d ' + self._filterSeason : '') +
               (self._filterEpisode ? ' \u2022 \u0421\u0435\u0440\u0438\u044f ' + self._filterEpisode : '') + '\u2026';
 
-        // ── Rebuild UI: all content (source selector + season bar + spinner) in ONE Scroll ──
-        // Destroy any existing scroll first to avoid detached-DOM leaks.
+        // ── Rebuild UI: source selector + season bar + loading spinner ──
+        // Use a plain DOM layout here (no Lampa.Scroll) so that creating/destroying
+        // the loading scroll does not interfere with Lampa's activity controller.
+        // The Lampa.Scroll for keyboard navigation is created in _renderVariants once
+        // the full variant list is ready.
         try { if (self._scroll && self._scroll.destroy) { self._scroll.destroy(); } } catch (e) { log('scroll destroy', e.message); }
         self._scroll = null;
         self._render.empty();
 
-        // 1. Source selector [Все | TorBox | HDRezka]
+        // 1. Source selector [Все | TorBox | HDRezka] — always visible, even during loading
         var srcSel = buildSourceSelector(self._activeSource, function (key) {
             self._activeSource  = key;
             // Map selector key to result source filter:
@@ -761,11 +764,11 @@
             if (key !== 'rezka') { self._resetRezkaState(); }
             self._fetchVariants();
         });
+        self._render.append(srcSel);
 
-        // 2. Season/episode bar
-        var earlyBar = null;
+        // 2. Season/episode bar — shown immediately so it's always accessible
         if (self._isSeries && self._seriesSeasons.length > 0) {
-            earlyBar = buildFilters(
+            var earlyBar = buildFilters(
                 [], '', '', self._filterSeason, self._seriesSeasons,
                 self._filterEpisode, self._episodeCounts, '',
                 function (type, val) {
@@ -787,30 +790,13 @@
                     }
                 }
             );
+            if (earlyBar) { self._render.append(earlyBar); }
         }
 
-        // 3. Loading spinner
+        // 3. Loading spinner (below selector + season bar)
         var spinnerWrap = jq('<div class="em-cards-area">');
         spinnerWrap.html(loadingHtml(loadingLabel));
-
-        // Put everything in a Lampa.Scroll so source selector / season bar are
-        // keyboard-navigable during loading (TV-remote friendly).
-        try {
-            var loadSc = new Lampa.Scroll({ mask: true, over: true });
-            loadSc.render().addClass('layer--wheight');
-            loadSc.body().append(srcSel);
-            if (earlyBar) { loadSc.body().append(earlyBar); }
-            loadSc.body().append(spinnerWrap);
-            self._render.append(loadSc.render());
-            loadSc.start();
-            self._scroll = loadSc;
-        } catch (loadScrollErr) {
-            log('loadSc error', loadScrollErr.message);
-            self._render.append(srcSel);
-            if (earlyBar) { self._render.append(earlyBar); }
-            self._render.append(spinnerWrap);
-        }
-        setTimeout(function () { try { Lampa.Controller.toggle('content'); } catch (e) {} }, 100);
+        self._render.append(spinnerWrap);
 
         var params = {};
         if (title) { params.title = title; }

@@ -68,9 +68,16 @@ async def get_user_info() -> dict:
     return await _get("/user/me")
 
 
-async def get_torrent_list() -> list[dict]:
-    """Return list of user's torrents."""
-    result = await _get("/torrents/mylist")
+async def get_torrent_list(bypass_cache: bool = False) -> list[dict]:
+    """Return list of user's torrents.
+
+    Pass ``bypass_cache=True`` to force TorBox to skip its server-side cache
+    and return a fully fresh response including the ``files`` list for each
+    torrent.  Needed in Fast-Path A so we can retrieve file IDs for an
+    already-seeding torrent without waiting for the next polling cycle.
+    """
+    params: dict | None = {"bypass_cache": "true"} if bypass_cache else None
+    result = await _get("/torrents/mylist", params=params)
     return result.get("data", [])
 
 
@@ -197,10 +204,10 @@ async def batch_check_cached(infohashes: list[str]) -> dict[str, bool]:
         return {}
 
 
-async def get_torrent_by_id(torrent_id: int | str) -> dict | None:
+async def get_torrent_by_id(torrent_id: int | str, bypass_cache: bool = False) -> dict | None:
     """Return a single torrent record from mylist by id."""
     try:
-        torrents = await get_torrent_list()
+        torrents = await get_torrent_list(bypass_cache=bypass_cache)
         for t in torrents:
             if str(t.get("id")) == str(torrent_id):
                 return t
@@ -209,11 +216,11 @@ async def get_torrent_by_id(torrent_id: int | str) -> dict | None:
     return None
 
 
-async def get_torrent_by_hash(infohash: str) -> dict | None:
+async def get_torrent_by_hash(infohash: str, bypass_cache: bool = False) -> dict | None:
     """Return a single torrent record from mylist by info-hash (hex, lowercase)."""
     ih = infohash.lower()
     try:
-        torrents = await get_torrent_list()
+        torrents = await get_torrent_list(bypass_cache=bypass_cache)
         for t in torrents:
             if (t.get("hash") or "").lower() == ih:
                 return t

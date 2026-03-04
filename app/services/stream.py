@@ -247,7 +247,12 @@ async def _process_job(job_id: str) -> None:
             infohash = _extract_infohash(job.magnet)
             if infohash:
                 try:
-                    existing = await torbox.get_torrent_by_hash(infohash)
+                    # bypass_cache=True: force TorBox to return a fresh response
+                    # including the files list for the torrent.  Without this,
+                    # TorBox may serve a stale cached response where files=[],
+                    # which would prevent Fast Path A from getting a download link
+                    # for an already-seeding torrent.
+                    existing = await torbox.get_torrent_by_hash(infohash, bypass_cache=True)
                     if existing:
                         existing_torrent_id = str(existing.get("id"))
                         ex_state = existing.get("download_state", "")

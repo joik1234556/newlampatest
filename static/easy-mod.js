@@ -11,8 +11,12 @@
     function getApi() {
         try {
             var stored = Lampa.Storage && Lampa.Storage.field && Lampa.Storage.field('easy_mod_api');
-            return (stored && stored.trim()) ? stored.trim().replace(/\/$/, '') : API_DEFAULT;
-        } catch (e) { return API_DEFAULT; }
+            if (stored && typeof stored === 'string') {
+                var trimmed = stored.trim().replace(/\/$/, '');
+                if (trimmed && /^https?:\/\//i.test(trimmed)) { return trimmed; }
+            }
+        } catch (e) {}
+        return API_DEFAULT;
     }
 
     // jQuery alias (Lampa always exposes $ globally)
@@ -172,8 +176,13 @@
     function netGetFb(url, ok, fail) {
         if (typeof fetch !== 'undefined') {
             fetch(url, { mode: 'cors' })
-                .then(function (r) { return r.json(); })
-                .then(function (j) { if (ok) { ok(j); } })
+                .then(function (r) {
+                    // For non-JSON responses (e.g. HTML error page from proxy/CDN)
+                    // return {} so the caller sees empty results instead of a
+                    // "connection error" — the server DID respond, just not with JSON.
+                    return r.json().catch(function () { return {}; });
+                })
+                .then(function (j) { if (ok) { ok(j || {}); } })
                 .catch(function (e) { if (fail) { fail(e.message || 'fetch error'); } });
         } else {
             var xhr = new XMLHttpRequest();

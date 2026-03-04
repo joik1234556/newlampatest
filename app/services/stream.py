@@ -339,6 +339,9 @@ async def create_job(req: StreamStartRequest) -> StreamJob:
                 "[Easy-Mod][Stream] dedup — returning existing job job_id=%s state=%s",
                 existing_job_id, existing.state,
             )
+            # Re-save to ensure in-memory mirror is populated (e.g. after a server
+            # restart where in-memory was cleared but Redis still has the job).
+            await _save_job(existing)
             return existing
 
     # ── 3. Create new job ─────────────────────────────────────────────────

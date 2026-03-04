@@ -90,7 +90,7 @@ async def stream_status(
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id must not be empty")
 
-    job = stream_svc.get_job(job_id.strip())
+    job = await stream_svc.load_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -160,7 +160,7 @@ async def stream_files(
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id must not be empty")
 
-    job = stream_svc.get_job(job_id.strip())
+    job = await stream_svc.load_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -260,7 +260,7 @@ async def stream_seasons(
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id must not be empty")
 
-    job = stream_svc.get_job(job_id.strip())
+    job = await stream_svc.load_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -347,7 +347,7 @@ async def stream_play_file(
     if not file_id.strip():
         raise HTTPException(status_code=400, detail="file_id must not be empty")
 
-    job = stream_svc.get_job(job_id.strip())
+    job = await stream_svc.load_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
@@ -473,7 +473,7 @@ async def stream_proxy(
     if not job_id.strip():
         raise HTTPException(status_code=400, detail="job_id must not be empty")
 
-    job = stream_svc.get_job(job_id.strip())
+    job = await stream_svc.load_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
     if not job.direct_url and not (job.torrent_id and job.file_id):
@@ -553,7 +553,7 @@ async def stream_proxy_file(
     if not file_id.strip():
         raise HTTPException(status_code=400, detail="file_id must not be empty")
 
-    job = stream_svc.get_job(job_id.strip())
+    job = await stream_svc.load_job(job_id.strip())
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
     if not job.torrent_id:

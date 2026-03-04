@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from urllib.parse import urlparse
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -15,9 +15,26 @@ logger = logging.getLogger(__name__)
 
 _HEADERS = {"Authorization": f"Bearer {TORBOX_API_KEY}"}
 
+# Persistent connection pool — reused across all requests in the same worker
+# process.  Limits: 20 total connections (handles burst of concurrent polls
+# from 30-50 users), 10 keepalive slots (reuses TLS sessions).
+# Thread-safety note: gunicorn uses separate OS processes (not threads) for each
+# worker, so each process has its own isolated _shared_client.  Within a single
+# async event loop there is no concurrent access to _client() because the
+# assignment is a single bytecode operation.
+_shared_client: Optional[httpx.AsyncClient] = None
+
 
 def _client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(headers=_HEADERS, timeout=30)
+    """Return the module-level shared AsyncClient, creating it on first call."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            headers=_HEADERS,
+            timeout=30,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _shared_client
 
 
 # ---------------------------------------------------------------------------
@@ -26,22 +43,20 @@ def _client() -> httpx.AsyncClient:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
 async def _get(path: str, params: dict | None = None) -> Any:
-    async with _client() as client:
-        resp = await client.get(f"{TORBOX_BASE_URL}{path}", params=params)
-        if not resp.is_success:
-            logger.error("TorBox GET %s status=%d body=%.300s", path, resp.status_code, resp.text)
-        resp.raise_for_status()
-        return resp.json()
+    resp = await _client().get(f"{TORBOX_BASE_URL}{path}", params=params)
+    if not resp.is_success:
+        logger.error("TorBox GET %s status=%d body=%.300s", path, resp.status_code, resp.text)
+    resp.raise_for_status()
+    return resp.json()
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
 async def _post(path: str, data: dict | None = None) -> Any:
-    async with _client() as client:
-        resp = await client.post(f"{TORBOX_BASE_URL}{path}", data=data)
-        if not resp.is_success:
-            logger.error("TorBox POST %s status=%d body=%.300s", path, resp.status_code, resp.text)
-        resp.raise_for_status()
-        return resp.json()
+    resp = await _client().post(f"{TORBOX_BASE_URL}{path}", data=data)
+    if not resp.is_success:
+        logger.error("TorBox POST %s status=%d body=%.300s", path, resp.status_code, resp.text)
+    resp.raise_for_status()
+    return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -103,17 +118,16 @@ async def add_torrent_from_url(torrent_url: str) -> dict:
     if not filename.endswith(".torrent"):
         filename += ".torrent"
 
-    async with _client() as upload_client:
-        resp = await upload_client.post(
+    resp = await _client().post(
             f"{TORBOX_BASE_URL}/torrents/createtorrent",
             files={"torrent": (filename, torrent_bytes, "application/x-bittorrent")},
         )
-        if not resp.is_success:
-            logger.error(
-                "TorBox upload torrent status=%d body=%.300s", resp.status_code, resp.text
-            )
-        resp.raise_for_status()
-        result = resp.json()
+    if not resp.is_success:
+        logger.error(
+            "TorBox upload torrent status=%d body=%.300s", resp.status_code, resp.text
+        )
+    resp.raise_for_status()
+    result = resp.json()
     logger.info("TorBox createtorrent (url upload) response: %s", result)
     return result
 
@@ -163,15 +177,14 @@ async def batch_check_cached(infohashes: list[str]) -> dict[str, bool]:
         return {}
     try:
         hashes_csv = ",".join(h.lower() for h in infohashes if h)
-        async with _client() as client:
-            resp = await client.post(
-                f"{TORBOX_BASE_URL}/torrents/checkcached",
-                json={"torrent_hashes": hashes_csv},
-            )
-            if not resp.is_success:
-                logger.warning("TorBox batch_check_cached status=%d", resp.status_code)
-                return {}
-            result = resp.json()
+        resp = await _client().post(
+            f"{TORBOX_BASE_URL}/torrents/checkcached",
+            json={"torrent_hashes": hashes_csv},
+        )
+        if not resp.is_success:
+            logger.warning("TorBox batch_check_cached status=%d", resp.status_code)
+            return {}
+        result = resp.json()
         data = result.get("data") or []
         if isinstance(data, list):
             return {item["hash"].lower(): bool(item.get("cached")) for item in data if "hash" in item}

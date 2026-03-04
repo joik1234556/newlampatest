@@ -23,6 +23,14 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Optimised for a 4 GB server: cap Redis at 512 MB, evict least-recently-used
+    # keys first so the cache never fills the RAM and stalls the backend.
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
     volumes:
       - redis_data:/data
     healthcheck:

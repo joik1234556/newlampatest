@@ -63,92 +63,147 @@ async def _torbox_search_variants(
 
     When ``season`` is provided, results are filtered to only include torrents
     whose title matches the requested season (exact, range, or complete-series).
-    """
-    # Build the most specific search query possible
-    if season and episode:
-        search_q = f"{query} S{season:02d}E{episode:02d}"
-    elif season:
-        search_q = f"{query} S{season:02d}"
-        if year:
-            search_q = f"{query} {year} S{season:02d}"
-    else:
-        search_q = f"{query} {year}" if year else query
-    try:
-        results = await torbox_client.search_torbox(search_q, cached_only=True, limit=20)
-    except Exception as exc:
-        logger.warning("[Variants] TorBox search error: %s", exc)
-        return []
 
-    variants: list[Variant] = []
-    for r in results:
-        name = r.get("name") or r.get("title") or ""
-        if not name:
-            continue
-        h = r.get("hash") or r.get("info_hash") or ""
-        if not h:
-            continue
-        # Filter out results that don't match the target title.
-        # This prevents TorBox's broad search from returning wrong films.
-        if filter_title:
-            title_ok = _title_matches(filter_title, name)
-            if not title_ok and filter_original:
-                title_ok = _title_matches(filter_original, name)
-            if not title_ok:
+    Falls back to progressively broader queries when the specific query finds nothing:
+      1. title + year + SxxExx  (most specific — episode)
+      2. title + SxxExx         (drop year)
+      3. title + year + Sxx     (season, no episode)
+      4. title + Sxx            (season only, no year)
+      5. title + year           (no season/episode)
+      6. title only             (broadest — last resort)
+    For films (no season), only queries 5-6 are tried.
+    Also retries with original_title when the localised title finds nothing.
+    """
+    def _build_queries(q: str, yr: Optional[int], s: Optional[int], ep: Optional[int]) -> list[str]:
+        if s and ep:
+            candidates = [
+                f"{q} S{s:02d}E{ep:02d}",
+                f"{q} {yr} S{s:02d}E{ep:02d}" if yr else "",
+                f"{q} S{s:02d}",
+                f"{q} {yr} S{s:02d}" if yr else "",
+                f"{q} {yr}" if yr else "",
+                q,
+            ]
+        elif s:
+            candidates = [
+                f"{q} {yr} S{s:02d}" if yr else f"{q} S{s:02d}",
+                f"{q} S{s:02d}",
+                f"{q} {yr}" if yr else "",
+                q,
+            ]
+        else:
+            candidates = [
+                f"{q} {yr}" if yr else q,
+                q,
+            ]
+        # Deduplicate while preserving order; drop empty strings
+        seen_q: set[str] = set()
+        result_list: list[str] = []
+        for item in candidates:
+            if item and item not in seen_q:
+                seen_q.add(item)
+                result_list.append(item)
+        return result_list
+
+    async def _run_query(search_q: str) -> list[dict]:
+        try:
+            return await torbox_client.search_torbox(search_q, cached_only=True, limit=20)
+        except Exception as exc:
+            logger.warning("[Variants] TorBox search error for '%s': %s", search_q, exc)
+            return []
+
+    def _filter_results(results: list[dict], ft: str, fo: Optional[str]) -> list[Variant]:
+        items: list[Variant] = []
+        for r in results:
+            name = r.get("name") or r.get("title") or ""
+            if not name:
+                continue
+            h = r.get("hash") or r.get("info_hash") or ""
+            if not h:
+                continue
+            if ft:
+                title_ok = _title_matches(ft, name)
+                if not title_ok and fo:
+                    title_ok = _title_matches(fo, name)
+                if not title_ok:
+                    logger.debug(
+                        "[Variants] torbox_search: skip '%s' — title mismatch for '%s'",
+                        name[:60], ft,
+                    )
+                    continue
+            if year and not _year_ok(name, year):
                 logger.debug(
-                    "[Variants] torbox_search: skip '%s' — title mismatch for '%s'",
-                    name[:60], filter_title,
+                    "[Variants] torbox_search: skip '%s' — year mismatch (want %s)",
+                    name[:60], year,
                 )
                 continue
-        # Year soft-filter (same ±1 tolerance as Jackett)
-        if year and not _year_ok(name, year):
-            logger.debug(
-                "[Variants] torbox_search: skip '%s' — year mismatch (want %s)",
-                name[:60], year,
-            )
-            continue
-        # Season filter: when a specific season is requested, reject torrents that
-        # contain a different season marker in their name.
-        if season:
-            name_ok = False
-            if _COMPLETE_RE.search(name):
-                name_ok = True  # complete-series pack — relevant for any season
-            else:
-                m_range = _SEASON_RANGE_RE.search(name)
-                if m_range:
-                    s_start = int(m_range.group(1))
-                    s_end   = int(m_range.group(2))
-                    name_ok = s_start <= season <= s_end
+            if season:
+                name_ok = False
+                if _COMPLETE_RE.search(name):
+                    name_ok = True
                 else:
-                    m_season = _SEASON_RE.search(name)
-                    if not m_season:
-                        name_ok = True  # no season marker — could be full-series pack
+                    m_range = _SEASON_RANGE_RE.search(name)
+                    if m_range:
+                        s_start = int(m_range.group(1))
+                        s_end   = int(m_range.group(2))
+                        name_ok = s_start <= season <= s_end
                     else:
-                        # Extract the matched season number from whichever group captured it
-                        found_str = next((g for g in m_season.groups() if g is not None), "0")
-                        found = int(found_str)
-                        name_ok = found == season
-            if not name_ok:
-                logger.debug(
-                    "[Variants] torbox_search: skip '%s' — season mismatch (want S%02d)",
-                    name[:60], season,
-                )
-                continue
-        magnet = f"magnet:?xt=urn:btih:{h}&dn={name}"
-        seeders  = int(r.get("seeders") or 0)
-        size_bytes = int(r.get("size") or 0)
-        size_mb  = size_bytes // (1024 * 1024) if size_bytes else 0
-        quality  = guess_quality(name)
-        codec    = guess_codec(name)
-        voice    = guess_voice(name)
-        language = detect_language(name)
-        vid = hashlib.sha1(f"torbox_search:{h}:{quality}".encode()).hexdigest()[:12]
-        label = f"{voice} • {quality.upper()}" if voice else name[:55].rstrip(" .-")
-        variants.append(Variant(
-            id=vid, label=label, language=language, voice=voice,
-            quality=quality, size_mb=size_mb, seeders=seeders,
-            codec=codec, magnet=magnet,
-            is_cached=True,
-        ))
+                        m_season = _SEASON_RE.search(name)
+                        if not m_season:
+                            name_ok = True
+                        else:
+                            found_str = next((g for g in m_season.groups() if g is not None), "0")
+                            name_ok = int(found_str) == season
+                if not name_ok:
+                    logger.debug(
+                        "[Variants] torbox_search: skip '%s' — season mismatch (want S%02d)",
+                        name[:60], season,
+                    )
+                    continue
+            magnet = f"magnet:?xt=urn:btih:{h}&dn={name}"
+            seeders    = int(r.get("seeders") or 0)
+            size_bytes = int(r.get("size") or 0)
+            size_mb    = size_bytes // (1024 * 1024) if size_bytes else 0
+            quality    = guess_quality(name)
+            codec      = guess_codec(name)
+            voice      = guess_voice(name)
+            language   = detect_language(name)
+            vid = hashlib.sha1(f"torbox_search:{h}:{quality}".encode()).hexdigest()[:12]
+            label = f"{voice} • {quality.upper()}" if voice else name[:55].rstrip(" .-")
+            items.append(Variant(
+                id=vid, label=label, language=language, voice=voice,
+                quality=quality, size_mb=size_mb, seeders=seeders,
+                codec=codec, magnet=magnet,
+                is_cached=True,
+            ))
+        return items
+
+    # Build candidate search queries and try them in order, stopping on first hit.
+    # Also include variants with the original (English) title when it differs.
+    queries_main = _build_queries(query, year, season, episode)
+    queries_orig: list[str] = []
+    if filter_original and filter_original.lower() != query.lower():
+        queries_orig = _build_queries(filter_original, year, season, episode)
+
+    seen_hashes: set[str] = set()
+    variants: list[Variant] = []
+
+    for search_q in queries_main + queries_orig:
+        raw = await _run_query(search_q)
+        hits = _filter_results(raw, filter_title, filter_original)
+        # Deduplicate by magnet hash across fallback rounds
+        for v in hits:
+            ih = re.search(r"urn:btih:([0-9a-fA-F]{32,40})", v.magnet or "", re.IGNORECASE)
+            key = ih.group(1).lower() if ih else v.id
+            if key not in seen_hashes:
+                seen_hashes.add(key)
+                variants.append(v)
+        if variants:
+            logger.info(
+                "[Variants] TorBox search hit query='%s' → %d results", search_q, len(variants)
+            )
+            break  # found enough — don't run broader fallback queries
+
     return variants
 
 

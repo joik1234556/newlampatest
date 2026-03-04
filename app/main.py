@@ -27,6 +27,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
@@ -99,6 +100,9 @@ app.add_middleware(
     expose_headers=["*"],
     max_age=86400,
 )
+
+# Compress JSON responses >= 1 KB to reduce bandwidth (helps Lampa TV clients)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 @app.middleware("http")

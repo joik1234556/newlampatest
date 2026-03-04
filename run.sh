@@ -31,11 +31,11 @@ echo "[run.sh] installing/updating dependencies"
 pip install -q -r requirements.txt
 
 RELOAD_FLAG=""
-WORKERS=2
+WORKERS=4
 if [ "$1" = "--reload" ]; then
     RELOAD_FLAG="--reload"
     WORKERS=1   # --reload is incompatible with multiple workers
 fi
 
 echo "[run.sh] starting uvicorn on 0.0.0.0:8000 (workers=${WORKERS}) ${RELOAD_FLAG}"
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers "${WORKERS}" ${RELOAD_FLAG}
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers "${WORKERS}" --timeout-keep-alive 5 ${RELOAD_FLAG}

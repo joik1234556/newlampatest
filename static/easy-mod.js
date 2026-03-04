@@ -1243,8 +1243,8 @@
         this._ticks        = 0;
         this._statusErrors = 0;
         this._FAST_TICKS   = 30;
-        this._FAST_INTERVAL= 800;
-        this._SLOW_INTERVAL= 5000;
+        this._FAST_INTERVAL= 500;
+        this._SLOW_INTERVAL= 3000;
         this._MAX_TICKS    = 75;
     }
 
@@ -1376,11 +1376,23 @@
         // SxxExx (highest priority — most explicit)
         var m = basename.match(/[Ss]\d{1,2}[Ee](\d{1,3})/);
         if (m) { return parseInt(m[1], 10); }
+        // NxNN  (1x01, 2x05 etc.)
+        m = basename.match(/\b\d{1,2}[xXхХ](\d{1,3})\b/);
+        if (m) { return parseInt(m[1], 10); }
         // Exx or EPxx
         m = basename.match(/[Ee][Pp]?(\d{1,3})/);
         if (m) { return parseInt(m[1], 10); }
-        // episode N
-        m = basename.match(/episode\s*(\d{1,3})/i);
+        // episode N / серия N
+        m = basename.match(/(?:episode|серия)\s*(\d{1,3})/i);
+        if (m) { return parseInt(m[1], 10); }
+        // N серия  (e.g. "12 серия")
+        m = basename.match(/\b(\d{1,3})\s+серия\b/i);
+        if (m) { return parseInt(m[1], 10); }
+        // [NN] or (NN) — bracketed numbers often used on Russian trackers (enforce balanced)
+        m = basename.match(/\[0*([1-9]\d?)\]|\(0*([1-9]\d?)\)/);
+        if (m) { return parseInt(m[1] || m[2], 10); }
+        // standalone 1-99 surrounded by dots/dashes/spaces, not preceded by resolution digits
+        m = basename.match(/(?:^|[\s._\-])0*([1-9]\d?)(?:v\d)?(?:[\s._\-]|$)/);
         if (m) { return parseInt(m[1], 10); }
         return 0;
     }
@@ -1391,6 +1403,12 @@
         // SxxExx or Sxx standalone
         var m = basename.match(/[Ss](\d{1,2})[Ee]\d{1,3}/);
         if (m) { return parseInt(m[1], 10); }
+        m = basename.match(/\b[Ss](\d{1,2})\b/);
+        if (m) { return parseInt(m[1], 10); }
+        // NxNN  (1x01 → season 1)
+        m = basename.match(/\b(\d{1,2})[xXхХ]\d{1,3}\b/);
+        if (m) { return parseInt(m[1], 10); }
+        // season N / сезон N
         m = basename.match(/(?:season|сезон)\s*(\d{1,2})/i);
         if (m) { return parseInt(m[1], 10); }
         return 0;

@@ -117,15 +117,18 @@ _VIDEO_EXTS = frozenset(
 )
 
 # Patterns to extract episode number from a filename, in priority order.
-# Captures: SxxExx, Exx/EPxx, "episode N".
+# NOTE: Keep this in sync with _fileEpNum() in static/easy-mod.js.
 # The standalone-number pattern is intentionally limited to 1-2 digits (1-99)
 # to avoid false-positive matches with years (2021), resolutions (1080/720),
 # or other 3–4 digit metadata that commonly appear in video filenames.
 _EP_RE = re.compile(
-    r"[Ss]\d{1,2}[Ee](\d{1,3})"          # S01E03 → group 1
-    r"|[Ee][Pp]?(\d{1,3})"               # E03, EP03 → group 2
-    r"|\bepisode\s*(\d{1,3})\b"          # episode 3 → group 3
-    r"|(?:^|[\s._\-])0*([1-9]\d?)(?:v\d)?(?:[\s._\-]|$)",  # standalone 1-99 → group 4
+    r"[Ss]\d{1,2}[Ee](\d{1,3})"                             # S01E03 → group 1
+    r"|\b\d{1,2}[xX](\d{1,3})\b"                            # 1x03   → group 2
+    r"|[Ee][Pp]?(\d{1,3})"                                   # E03, EP03 → group 3
+    r"|\b(?:episode|серия)\s*(\d{1,3})\b"                    # episode/серия 3 → group 4
+    r"|\b(\d{1,3})\s+серия\b"                                # 12 серия → group 5
+    r"|\[0*([1-9]\d?)\]|\(0*([1-9]\d?)\)"                   # [03] or (03) → groups 6-7
+    r"|(?:^|[\s._\-])0*([1-9]\d?)(?:v\d)?(?:[\s._\-]|$)",  # standalone 1-99 → group 8
     re.IGNORECASE,
 )
 

@@ -60,7 +60,7 @@ JOB_TTL: int = int(os.getenv("JOB_TTL", "7200"))                           # 2 h
 # TorBox polling strategy
 TORBOX_POLL_MAX_SECONDS: int = int(os.getenv("TORBOX_POLL_MAX_SECONDS", "180"))   # 3 min total
 TORBOX_POLL_FAST_SECONDS: int = int(os.getenv("TORBOX_POLL_FAST_SECONDS", "30"))  # fast phase
-TORBOX_POLL_FAST_INTERVAL: int = int(os.getenv("TORBOX_POLL_FAST_INTERVAL", "2")) # secs
+TORBOX_POLL_FAST_INTERVAL: int = int(os.getenv("TORBOX_POLL_FAST_INTERVAL", "1")) # secs (was 2)
 TORBOX_POLL_SLOW_INTERVAL: int = int(os.getenv("TORBOX_POLL_SLOW_INTERVAL", "5")) # secs
 
 # Log level

@@ -52,10 +52,14 @@ async def stream_start(
         logger.error("[Easy-Mod][/stream/start] error: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    # ── Fast-path wait: poll for up to 2 s so instantly-cached torrents
+    # ── Fast-path wait: poll for up to 5 s so instantly-cached torrents
     # return direct_url in the initial response (no client polling needed).
+    # The background task's immediate-cache check can take up to ~4 s for
+    # globally-cached torrents (4 attempts × 1 s sleep), so we wait slightly
+    # longer here to cover that window and avoid the client ever showing a
+    # progress screen for an already-ready torrent.
     if job.state not in ("ready", "failed"):
-        for _ in range(4):  # 4 × 0.5 s = 2 s max
+        for _ in range(10):  # 10 × 0.5 s = 5 s max
             await asyncio.sleep(0.5)
             updated = await stream_svc.load_job(job.job_id)
             if updated is None:

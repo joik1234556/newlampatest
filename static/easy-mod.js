@@ -1278,7 +1278,7 @@
             }
         });
 
-        self._scheduleNext();
+        self._poll();
     };
 
     EasyModWait.prototype._scheduleNext = function () {

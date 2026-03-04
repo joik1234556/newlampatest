@@ -643,7 +643,16 @@
                 left:   function () { _doShift(render, 'left'); },
                 up:     function () { _doShift(render, 'up'); },
                 down:   function () { _doShift(render, 'down'); },
-                enter:  function () { Lampa.Controller.collectionEnter(); },
+                enter:  function () {
+                    if (typeof Lampa.Controller.collectionEnter === 'function') {
+                        Lampa.Controller.collectionEnter();
+                    } else {
+                        // Fallback: trigger hover:enter on the currently focused .selector
+                        var focused = render.find('.selector.focus').first();
+                        if (!focused.length) { focused = render.find('.selector.selected').first(); }
+                        if (focused.length) { focused.trigger('hover:enter'); }
+                    }
+                },
                 back:   function () {
                     if (onBack) {
                         try { onBack(); } catch (e) { log('activateLampaNav onBack error:', e.message); }

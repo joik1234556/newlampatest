@@ -212,13 +212,17 @@ async def _load_job(job_id: str) -> Optional[StreamJob]:
         return None
 
 
-async def _save_direct_url(magnet_hash: str, magnet: str, url: str) -> None:
-    """Persist direct_url to cache keyed by both magnet-hash and infohash."""
-    await direct_url_cache.aset(magnet_hash, url)
+async def _save_torrent_meta(magnet_hash: str, magnet: str, torrent_id: str, file_id: str) -> None:
+    """
+    Persist torrent_id:file_id to cache so future requests can obtain a fresh CDN URL
+    via request_download_link instead of re-using an expiring direct CDN URL.
+    """
+    meta = f"{torrent_id}:{file_id}"
+    await direct_url_cache.aset(magnet_hash, meta)
     infohash = _extract_infohash(magnet)
     if infohash:
-        await direct_url_cache.aset(infohash, url)
-        logger.debug("[Easy-Mod][Stream] direct_url cached by infohash=%s", infohash)
+        await direct_url_cache.aset(infohash, meta)
+        logger.debug("[Easy-Mod][Stream] torrent_meta cached by infohash=%s", infohash)
 
 
 async def _update_job(job_id: str, **kwargs) -> Optional[StreamJob]:
@@ -262,37 +266,69 @@ async def create_job(req: StreamStartRequest) -> StreamJob:
     Create (or return an existing) StreamJob for the given magnet.
 
     Flow:
-      1. direct_url cache hit → return ready job immediately
+      1. torrent_meta cache hit → get fresh CDN URL via request_download_link and return ready job
       2. magnet_job dedup → return existing in-flight/done job
       3. Create new job, persist, launch background polling
     """
     mhash = _magnet_hash(req.magnet)
 
-    # ── 1. Direct URL already cached ──────────────────────────────────────
-    cached_url = await direct_url_cache.aget(mhash)
-    if not cached_url:
+    # ── 1. Torrent metadata already cached ────────────────────────────────
+    # The cache stores "torrent_id:file_id" (new format) which lets us obtain
+    # a fresh CDN URL on every request — avoiding 404s from expired CDN links.
+    # Old format entries (raw CDN URLs starting with "http") are ignored.
+    cached_meta = await direct_url_cache.aget(mhash)
+    if not cached_meta:
         # Also try by infohash (legacy key from previous implementation)
         infohash = _extract_infohash(req.magnet)
         if infohash:
-            cached_url = await direct_url_cache.aget(infohash)
+            cached_meta = await direct_url_cache.aget(infohash)
 
-    if cached_url:
-        logger.info("[Easy-Mod][Stream] direct_url cache hit magnet_hash=%s", mhash)
-        job = StreamJob(
-            variant_id=req.variant_id,
-            magnet=req.magnet,
-            magnet_hash=mhash,
-            title=req.title,
-            state="ready",
-            progress=1.0,
-            direct_url=cached_url,
-            message="Cached direct link",
-            # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
-            season=req.season or None,
-            episode=req.episode or None,
+    if cached_meta and isinstance(cached_meta, str) and not cached_meta.startswith("http"):
+        # New format: "torrent_id:file_id"
+        parts = cached_meta.split(":", 1)
+        if len(parts) == 2:
+            t_id, f_id = parts
+            logger.info(
+                "[Easy-Mod][Stream] torrent_meta cache hit torrent_id=%s magnet_hash=%s",
+                t_id, mhash,
+            )
+            try:
+                fresh_url = await torbox.request_download_link(t_id, f_id)
+                if fresh_url:
+                    job = StreamJob(
+                        variant_id=req.variant_id,
+                        magnet=req.magnet,
+                        magnet_hash=mhash,
+                        title=req.title,
+                        torrent_id=t_id,
+                        file_id=f_id,
+                        state="ready",
+                        progress=1.0,
+                        direct_url=fresh_url,
+                        message="Cached torrent",
+                        # === НОВАЯ ЛОГИКА ДЛЯ СЕРИАЛОВ ===
+                        season=req.season or None,
+                        episode=req.episode or None,
+                    )
+                    await _save_job(job)
+                    return job
+                logger.info(
+                    "[Easy-Mod][Stream] cache-hit requestdl returned empty url "
+                    "torrent_id=%s — falling through to normal processing",
+                    t_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Easy-Mod][Stream] cache-hit fresh URL failed torrent_id=%s: %s "
+                    "— falling through to normal processing",
+                    t_id, exc,
+                )
+    elif cached_meta and isinstance(cached_meta, str):
+        # Old format: raw CDN URL (expires quickly — ignore and let normal processing run)
+        logger.info(
+            "[Easy-Mod][Stream] ignoring stale CDN URL in cache (old format) magnet_hash=%s",
+            mhash,
         )
-        await _save_job(job)
-        return job
 
     # ── 2. Dedup — same magnet already being processed ────────────────────
     existing_job_id = await magnet_job_cache.aget(mhash)
@@ -396,7 +432,7 @@ async def _process_job(job_id: str) -> None:
                                 direct_url = None
                             if direct_url:
                                 mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                                await _save_direct_url(mhash, job.magnet, direct_url)
+                                await _save_torrent_meta(mhash, job.magnet, existing_torrent_id, str(file_id))
                                 await _update_job(
                                     job_id,
                                     torrent_id=existing_torrent_id,
@@ -545,7 +581,7 @@ async def _process_job(job_id: str) -> None:
                                 dl_url = None
                             if dl_url:
                                 mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                                await _save_direct_url(mhash, job.magnet, dl_url)
+                                await _save_torrent_meta(mhash, job.magnet, torrent_id, str(fid))
                                 await _update_job(
                                     job_id,
                                     torrent_id=torrent_id,
@@ -663,7 +699,7 @@ async def _process_job(job_id: str) -> None:
 
                     if direct_url:
                         mhash = job.magnet_hash or _magnet_hash(job.magnet)
-                        await _save_direct_url(mhash, job.magnet, direct_url)
+                        await _save_torrent_meta(mhash, job.magnet, torrent_id, str(file_id))
                         await _update_job(
                             job_id,
                             torrent_id=torrent_id,

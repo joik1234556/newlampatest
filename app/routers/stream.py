@@ -413,6 +413,22 @@ async def _proxy_url(request: Request, url: str) -> StreamingResponse:
         logger.error("[proxy] upstream request error url=%.80s: %s", url, exc)
         raise HTTPException(status_code=502, detail=f"Upstream error: {exc}") from exc
 
+    # If the upstream returns an error status, do NOT stream the error body to
+    # the video player — the player would misinterpret a 404/403 body as a
+    # broken video stream.  Return a 502 so the client can show a proper error.
+    if resp.status_code >= 400:
+        await resp.aclose()
+        await client.aclose()
+        logger.error(
+            "[proxy] upstream returned error status=%d url=%.80s",
+            resp.status_code, url,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Video stream source error ({resp.status_code}). "
+                   "The CDN link may have expired -- please go back and select the variant again.",
+        )
+
     # Collect response headers to forward (skip hop-by-hop headers)
     resp_headers: dict[str, str] = {"Accept-Ranges": "bytes"}
     for h in ("Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag"):

@@ -157,20 +157,26 @@ class TestStreamStart:
         assert body["status"] in ("queued", "ready")
 
     def test_start_returns_immediately_if_cached(self, client):
-        # Prime direct_url cache (using infohash as legacy key)
+        # Prime direct_url cache with new format: "torrent_id:file_id"
+        # This simulates a previously-processed torrent stored in the fast-path cache.
         from app.cache import direct_url_cache
         direct_url_cache.set(
             "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-            "https://cdn.torbox.app/cached.mkv",
+            "torrent_123:file_456",
         )
-        resp = client.post(
-            "/stream/start",
-            json={"variant_id": "v_cached", "magnet": DEMO_MAGNET, "title": "Cached"},
-        )
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/cached.mkv"
+            resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_cached", "magnet": DEMO_MAGNET, "title": "Cached"},
+            )
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ready"
-        # New: direct_url must be included in /stream/start when status=ready
+        # direct_url must be included in /stream/start when status=ready
         assert body.get("direct_url") == "https://cdn.torbox.app/cached.mkv"
 
     def test_start_dedup_same_magnet_returns_same_job(self, client):
@@ -345,16 +351,21 @@ class TestStreamStatus:
         assert 0.0 <= body["progress"] <= 1.0
 
     def test_status_ready_has_direct_url(self, client):
-        # Force a ready job via cache
+        # Force a ready job via cache (new format: torrent_id:file_id)
         from app.cache import direct_url_cache
         direct_url_cache.set(
             "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-            "https://cdn.torbox.app/ready.mkv",
+            "torrent_ready:file_ready",
         )
-        start_resp = client.post(
-            "/stream/start",
-            json={"variant_id": "v_ready", "magnet": DEMO_MAGNET, "title": "ReadyTest"},
-        )
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/ready.mkv"
+            start_resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_ready", "magnet": DEMO_MAGNET, "title": "ReadyTest"},
+            )
         job_id = start_resp.json()["job_id"]
         status_resp = client.get(f"/stream/status?job_id={job_id}")
         body = status_resp.json()
@@ -366,12 +377,17 @@ class TestStreamStatus:
         from app.cache import direct_url_cache
         direct_url_cache.set(
             "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-            "https://cdn.torbox.app/ready_proxy.mkv",
+            "torrent_proxy:file_proxy",
         )
-        start_resp = client.post(
-            "/stream/start",
-            json={"variant_id": "v_proxy", "magnet": DEMO_MAGNET, "title": "ProxyTest"},
-        )
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/ready_proxy.mkv"
+            start_resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_proxy", "magnet": DEMO_MAGNET, "title": "ProxyTest"},
+            )
         job_id = start_resp.json()["job_id"]
         status_resp = client.get(f"/stream/status?job_id={job_id}")
         body = status_resp.json()
@@ -384,11 +400,16 @@ class TestStreamStatus:
         from app.cache import direct_url_cache
         import hashlib
         mhash = hashlib.sha1(DEMO_MAGNET.encode()).hexdigest()
-        direct_url_cache.set(mhash, "https://cdn.torbox.app/cached.mkv")
-        resp = client.post(
-            "/stream/start",
-            json={"variant_id": "v_cache_proxy", "magnet": DEMO_MAGNET, "title": "CacheProxyTest"},
-        )
+        direct_url_cache.set(mhash, "torrent_cacheproxy:file_cacheproxy")
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/cached.mkv"
+            resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_cache_proxy", "magnet": DEMO_MAGNET, "title": "CacheProxyTest"},
+            )
         body = resp.json()
         assert body.get("status") == "ready"
         assert body.get("proxy_url"), "proxy_url must be present on cache-hit start"
@@ -1310,25 +1331,27 @@ class TestFastPathExistingTorrent:
         assert job.state in ("ready", "preparing", "failed")  # may not reach ready in mock
 
     def test_direct_url_cached_by_infohash(self):
-        """_save_direct_url saves by both magnet-hash and infohash."""
+        """_save_torrent_meta saves by both magnet-hash and infohash."""
         import asyncio
-        from app.services.stream import _save_direct_url, _extract_infohash
+        from app.services.stream import _save_torrent_meta, _extract_infohash
         from app.cache import direct_url_cache
 
         MAGNET = "magnet:?xt=urn:btih:1234567890ABCDEF1234567890ABCDEF12345678&dn=CacheTest"
         MHASH = "testmhash001"
-        URL = "https://cdn.torbox.app/test.mkv"
+        TORRENT_ID = "torrent_test_001"
+        FILE_ID = "file_test_001"
+        expected_meta = f"{TORRENT_ID}:{FILE_ID}"
 
         async def run():
-            await _save_direct_url(MHASH, MAGNET, URL)
+            await _save_torrent_meta(MHASH, MAGNET, TORRENT_ID, FILE_ID)
             by_hash = await direct_url_cache.aget(MHASH)
             infohash = _extract_infohash(MAGNET)
             by_ih = await direct_url_cache.aget(infohash) if infohash else None
             return by_hash, by_ih
 
         by_hash, by_ih = asyncio.get_event_loop().run_until_complete(run())
-        assert by_hash == URL
-        assert by_ih == URL  # cached by infohash too
+        assert by_hash == expected_meta
+        assert by_ih == expected_meta  # cached by infohash too
 
     def test_get_torrent_by_hash_returns_matching_torrent(self):
         """get_torrent_by_hash returns the torrent whose 'hash' field matches."""

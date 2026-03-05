@@ -43,6 +43,16 @@ KODIK_MIRRORS: list[str] = [
     "https://kodik.biz/",
 ]
 
+# === ZETFLIX SOURCE ===
+ZETFLIX_MIRRORS: list[str] = [
+    "https://4mar.zet-flix.online/",
+    "https://zetflix-online.run/",
+    "https://zetflixhd.buzz/",
+    "https://go.zetflix-online.lol/",
+    "https://zetflix-online.icu/",
+    # Add new mirrors here
+]
+
 # Request timeout for mirrors (seconds)
 MIRROR_TIMEOUT: int = 10
 

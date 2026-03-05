@@ -514,9 +514,9 @@
     // Shows only sources that have at least one variant.
     // Returns null when there is only one source (no tabs needed).
     // -------------------------------------------------------
-    var _ONLINE_SOURCE_KEYS = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1 };
+    var _ONLINE_SOURCE_KEYS = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1, zetflix: 1 };  // === ZETFLIX SOURCE ===
     var _SOURCE_KEY_TORRENT = 'torrent';
-    var _SOURCE_LABELS = { rezka: 'HDRezka', kinogo: 'Kinogo', videocdn: 'VideoCDN', kodik: 'Kodik', torrent: 'Easy-Mod' };
+    var _SOURCE_LABELS = { rezka: 'HDRezka', kinogo: 'Kinogo', videocdn: 'VideoCDN', kodik: 'Kodik', zetflix: 'Zetflix', torrent: 'Easy-Mod' };  // === ZETFLIX SOURCE ===
     var _LABEL_ALL         = '\u0412\u0441\u0435';          // "Все"
     var _HEADER_ONLINE     = '\uD83C\uDF10 \u041e\u043d\u043b\u0430\u0439\u043d \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438';
     var _HEADER_EASYMOD    = '\u26A1 Easy-Mod';
@@ -563,9 +563,10 @@
     function buildSourceSelector(activeSource, onChange) {
         var wrap = jq('<div class="em-source-tabs">');
         var defs = [
-            { key: 'all',    label: '\u0412\u0441\u0435',  type: '' },
-            { key: 'torbox', label: 'Easy-Mod',  type: 'torrent' },
-            { key: 'rezka',  label: 'HDRezka',   type: 'online' },
+            { key: 'all',     label: '\u0412\u0441\u0435',  type: '' },
+            { key: 'torbox',  label: 'Easy-Mod',  type: 'torrent' },
+            { key: 'rezka',   label: 'HDRezka',   type: 'online' },
+            { key: 'zetflix', label: 'Zetflix',   type: 'online' },  // === ZETFLIX SOURCE ===
         ];
         for (var i = 0; i < defs.length; i++) {
             (function (d) {
@@ -836,7 +837,10 @@
             //   'torbox' → show only torrent variants
             //   'rezka'  → show only rezka online variants
             //   'all'    → show all
-            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : '';
+            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT
+                             : (key === 'rezka')   ? 'rezka'
+                             : (key === 'zetflix') ? 'zetflix'     // === ZETFLIX SOURCE ===
+                             : '';
             self._allVariants   = [];
             self._filterVoice   = '';
             self._filterQuality = '';
@@ -892,18 +896,21 @@
         if (self._filterEpisode) { params.episode = self._filterEpisode; }
 
         // ── Fetch only the APIs relevant to the selected source ──────────────────
-        var wantTorbox = (self._activeSource === 'all' || self._activeSource === 'torbox');
-        var wantRezka  = (self._activeSource === 'all' || self._activeSource === 'rezka');
+        var wantTorbox  = (self._activeSource === 'all' || self._activeSource === 'torbox');
+        var wantRezka   = (self._activeSource === 'all' || self._activeSource === 'rezka');
+        var wantZetflix = (self._activeSource === 'all' || self._activeSource === 'zetflix');  // === ZETFLIX SOURCE ===
 
-        var variantsDone  = !wantTorbox;  // skip if not needed
-        var hdrezkaDone   = !wantRezka;   // skip if not needed
+        var variantsDone  = !wantTorbox;   // skip if not needed
+        var hdrezkaDone   = !wantRezka;    // skip if not needed
+        var zetflixDone   = !wantZetflix;  // skip if not needed  // === ZETFLIX SOURCE ===
         var variantsData  = [];
         var hdrezkaData   = [];
+        var zetflixData   = [];  // === ZETFLIX SOURCE ===
         var torboxFastPath = false;
         var variantsNetErr = false;  // true when the /variants request itself failed (network / 5xx)
 
         function _mergeAndRender() {
-            if (!variantsDone || !hdrezkaDone) { return; }
+            if (!variantsDone || !hdrezkaDone || !zetflixDone) { return; }  // === ZETFLIX SOURCE ===
             if (self._dead) { return; }
             // Discard stale responses: if the user switched season/episode while
             // this fetch was in-flight, a newer _fetchVariants has already started.
@@ -912,9 +919,9 @@
                 return;
             }
             try {
-                var all = variantsData.concat(hdrezkaData);
+                var all = variantsData.concat(hdrezkaData).concat(zetflixData);  // === ZETFLIX SOURCE ===
                 log('merged variants N=' + all.length + ' (torrent=' + variantsData.length +
-                    ' hdrezka=' + hdrezkaData.length + ')');
+                    ' hdrezka=' + hdrezkaData.length + ' zetflix=' + zetflixData.length + ')');
                 self._allVariants  = all;
                 self._variantsNetErr = variantsNetErr;
                 self._filterVoice  = '';
@@ -1020,6 +1027,50 @@
                 _mergeAndRender();
             });
         }
+
+        // === ZETFLIX SOURCE ===
+        if (wantZetflix) {
+            var ztParams = {};
+            if (title) { ztParams.title = title; }
+            if (year)  { ztParams.year  = year; }
+            if (self._filterSeason)  { ztParams.season  = self._filterSeason; }
+            if (self._filterEpisode) { ztParams.episode = self._filterEpisode; }
+
+            apiGet('/zetflix', ztParams, function (data) {
+                if (self._dead) { return; }
+                zetflixDone = true;
+                var files = (data && data.files) ? data.files : [];
+                zetflixData = [];
+                for (var zi = 0; zi < files.length; zi++) {
+                    var zf = files[zi];
+                    if (!zf.url) { continue; }
+                    // Use URL slice as unique suffix to avoid ID collisions on same-quality entries
+                    var ztId = 'zetflix_' + (zf.quality || 'unknown') + '_' + zf.url.slice(-12).replace(/[^a-z0-9]/gi, '_');
+                    zetflixData.push({
+                        id:        ztId,
+                        label:     'Zetflix \u2022 RU \u2022 ' + (zf.quality || '?').toUpperCase() + ' (Online)',
+                        quality:   zf.quality || 'unknown',
+                        url:       zf.url,
+                        source:    'zetflix',
+                        language:  'ru',
+                        voice:     'RU',
+                        is_cached: true,
+                        seeders:   0,
+                        size_mb:   0,
+                        codec:     '',
+                        magnet:    ''
+                    });
+                }
+                log('zetflix loaded N=' + zetflixData.length);
+                _mergeAndRender();
+            }, function (err) {
+                if (self._dead) { return; }
+                log('zetflix error (non-fatal)', err);
+                zetflixDone = true;
+                _mergeAndRender();
+            });
+        }
+        // === END ZETFLIX SOURCE ===
     };
 
     EasyModVariants.prototype._renderVariants = function () {

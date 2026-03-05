@@ -27,6 +27,7 @@ from app.providers.rezka import RezkaProvider
 from app.providers.kinogo import KinogoProvider
 from app.providers.videocdn import VideoCDNProvider
 from app.providers.kodik import KodikProvider
+from app.providers.zetflix import ZetflixProvider  # === ZETFLIX SOURCE ===
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ _MIN_TORRENT_QUALITY_RANK = 3  # 3 = "1080p" in _QUALITY_ORDER
 _MAX_PER_QUALITY_TIER = 2
 
 # Source keys for online (instant-play) providers.
-_ONLINE_SOURCES = frozenset({"rezka", "kinogo", "videocdn", "kodik"})
+_ONLINE_SOURCES = frozenset({"rezka", "kinogo", "videocdn", "kodik", "zetflix"})  # === ZETFLIX SOURCE ===
 
 # Minimum seeder count for torrent variants.
 # TorBox reliably caches well-seeded torrents (≥8 seeders → very likely in
@@ -284,7 +285,7 @@ async def get_variants(
     #   PublicJackettProvider is a fallback (only when private Jackett finds nothing).
     torrentio = TorrentioProvider()
     jackett   = JackettProvider()
-    online_providers = [RezkaProvider(), KinogoProvider(), VideoCDNProvider(), KodikProvider()]
+    online_providers = [RezkaProvider(), KinogoProvider(), VideoCDNProvider(), KodikProvider(), ZetflixProvider()]  # === ZETFLIX SOURCE ===
 
     provider_tasks = [
         torrentio.search_variants(title, year, tmdb_id, original_title=original_title, season=season, imdb_id=imdb_id, episode=episode),

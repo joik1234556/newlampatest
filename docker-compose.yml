@@ -13,6 +13,12 @@ version: "3.9"
 #
 # Просмотр логов:
 #   docker compose logs -f backend
+#
+# Обновление после git pull (НЕ используйте docker compose down — это сбросит
+# кеш Redis):
+#   ./update.sh                        # обычное обновление
+#   ./update.sh --no-cache             # при изменении requirements.txt
+#   docker compose up -d --no-deps --build backend   # ручной аналог
 # =============================================================================
 
 services:

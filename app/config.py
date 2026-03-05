@@ -43,6 +43,13 @@ KODIK_MIRRORS: list[str] = [
     "https://kodik.biz/",
 ]
 
+# === PROXY M3U8 - ONLY PLAYLIST ===
+# Enable the /proxy/m3u8 endpoint (proxies only m3u8 playlists, not .ts segments)
+PROXY_M3U8_ENABLED: bool = os.getenv("PROXY_M3U8_ENABLED", "1") == "1"
+# Future flag: set PROXY_FULL_STREAM=1 to also proxy .ts segments (high bandwidth!).
+# Not implemented yet — would significantly increase server bandwidth.
+PROXY_FULL_STREAM: bool = os.getenv("PROXY_FULL_STREAM", "0") == "1"
+
 # === ZETFLIX SOURCE ===
 ZETFLIX_MIRRORS: list[str] = [
     "https://4mar.zet-flix.online/",
@@ -52,16 +59,6 @@ ZETFLIX_MIRRORS: list[str] = [
     "https://zetflix-online.icu/",
     # Add new mirrors here
 ]
-
-# === PROXY M3U8 - ONLY PLAYLIST ===
-# Enable the /proxy/m3u8 endpoint which proxies m3u8 playlists and rewrites
-# relative segment URLs to absolute so that .ts files are fetched directly
-# from the CDN (not through this server).
-PROXY_M3U8_ENABLED: bool = os.getenv("PROXY_M3U8_ENABLED", "1") == "1"
-
-# Future-use flag: set PROXY_FULL_STREAM=1 to also proxy .ts media segments
-# (not implemented yet — would significantly increase server bandwidth).
-PROXY_FULL_STREAM: bool = os.getenv("PROXY_FULL_STREAM", "0") == "1"
 
 # Request timeout for mirrors (seconds)
 MIRROR_TIMEOUT: int = 10

@@ -18,7 +18,7 @@ import asyncio
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlencode, quote as _quote
+from urllib.parse import urljoin, urlparse, urlencode
 
 from bs4 import BeautifulSoup
 
@@ -31,6 +31,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _wrap_m3u8_url(url: str) -> str:
+    """
+    # === ZETFLIX PROXY ===
+    Wrap a raw m3u8 URL in the /proxy/m3u8 endpoint so Lampa gets CORS headers
+    and relative .ts links are rewritten to absolute CDN URLs.
+    Only wraps when PROXY_M3U8_ENABLED is True; returns the original URL otherwise.
+    """
+    if not PROXY_M3U8_ENABLED:
+        return url
+    if ".m3u8" not in url.lower():
+        return url
+    from urllib.parse import quote
+    wrapped = f"/proxy/m3u8?url={quote(url, safe='')}"
+    logger.info("[ZETFLIX PROXY] Wrapped m3u8 url: %s", wrapped)
+    return wrapped
+
 
 def _guess_quality(text: str) -> str:
     text_lower = text.lower()
@@ -186,7 +203,10 @@ def _extract_player_iframes(soup: BeautifulSoup, base_url: str) -> list[dict[str
         if not src or src in seen:
             return
         seen.add(src)
-        files.append({"quality": quality, "url": src})
+        # === ZETFLIX PROXY ===
+        # Wrap m3u8 playlists through the proxy to fix CORS; leave other URLs unchanged
+        proxied_src = _wrap_m3u8_url(src)
+        files.append({"quality": quality, "url": proxied_src})
 
     # 1. iframe[src] — most common player embedding method
     for iframe in soup.select("iframe[src]"):
@@ -257,22 +277,6 @@ async def get_detail(url: str) -> dict:
             poster = urljoin(base_url, poster)
 
     files = _extract_player_iframes(soup, base_url)
-
-    # === ZETFLIX PROXY ===
-    # Wrap m3u8 stream URLs so Lampa receives them via /proxy/m3u8 which
-    # adds CORS headers and rewrites relative segment paths to absolute CDN URLs.
-    # The .ts media segments themselves are served directly from CDN (no server traffic).
-    if PROXY_M3U8_ENABLED:
-        wrapped: list[dict] = []
-        for f in files:
-            file_url = f.get("url", "")
-            if file_url and ".m3u8" in file_url and file_url.startswith("http"):
-                proxied = f"/proxy/m3u8?url={_quote(file_url, safe='')}"
-                logger.debug("[ZETFLIX] Wrapped m3u8 url: %s", proxied)
-                wrapped.append({"quality": f.get("quality", "1080p"), "url": proxied})
-            else:
-                wrapped.append(f)
-        files = wrapped
 
     return {
         "title": title,

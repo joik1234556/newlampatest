@@ -45,10 +45,9 @@ KODIK_MIRRORS: list[str] = [
 
 # === PROXY M3U8 - ONLY PLAYLIST ===
 # Enable the /proxy/m3u8 endpoint (proxies only m3u8 playlists, not .ts segments)
-PROXY_M3U8_ENABLED: bool = os.getenv("PROXY_M3U8_ENABLED", "1") == "1"
-# Future flag: set PROXY_FULL_STREAM=1 to also proxy .ts segments (high bandwidth!).
-# Not implemented yet — would significantly increase server bandwidth.
-PROXY_FULL_STREAM: bool = os.getenv("PROXY_FULL_STREAM", "0") == "1"
+PROXY_M3U8_ENABLED: bool = True
+# Future flag: set True to proxy full stream including .ts segments (high bandwidth!)
+PROXY_FULL_STREAM: bool = False
 
 # === ZETFLIX SOURCE ===
 ZETFLIX_MIRRORS: list[str] = [

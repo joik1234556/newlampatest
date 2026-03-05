@@ -95,51 +95,31 @@ def _rewrite_m3u8(content: str, base_url: str) -> tuple[str, int]:
     .ts segments and nested m3u8 paths are turned into absolute URLs so that
     Lampa (or any HLS player) can fetch them directly from the CDN without
     going through this proxy.
-
-    Also rewrites URI="..." attributes on #EXT tags (e.g. encryption key URLs
-    in #EXT-X-KEY:METHOD=AES-128,URI="key.bin").
     """
-    # Rewrite URI="..." attributes inline within EXT tag lines (e.g. AES key URIs)
-    _uri_attr_re = re.compile(r'(URI=")([^"]+)(")')
-
-    def _make_abs(raw: str) -> tuple[str, bool]:
-        """Return (absolute_url, was_changed)."""
-        if raw.startswith("http://") or raw.startswith("https://"):
-            return raw, False
-        if raw.startswith("//"):
-            return "https:" + raw, True
-        return urljoin(base_url, raw), True
-
     lines = content.splitlines(keepends=True)
     rewritten: list[str] = []
     count = 0
 
     for line in lines:
         stripped = line.strip()
-        if not stripped:
+        # Skip EXT tags and blank lines – they are not URIs
+        if stripped.startswith("#") or not stripped:
             rewritten.append(line)
             continue
-
-        if stripped.startswith("#"):
-            # Rewrite URI="..." attributes within EXT tag lines (AES keys, etc.)
-            def _replace_uri_attr(m: re.Match) -> str:
-                nonlocal count
-                abs_url, changed = _make_abs(m.group(2))
-                if changed:
-                    count += 1
-                return m.group(1) + abs_url + m.group(3)
-
-            new_line = _uri_attr_re.sub(_replace_uri_attr, line)
-            rewritten.append(new_line)
+        # Only rewrite if it looks like a relative path (no scheme)
+        if stripped.startswith("http://") or stripped.startswith("https://"):
+            rewritten.append(line)
             continue
-
-        # Non-comment line: treat as a segment/sub-playlist URI
-        abs_url, changed = _make_abs(stripped)
-        if changed:
+        # Turn protocol-relative URLs absolute
+        if stripped.startswith("//"):
+            abs_url = "https:" + stripped
             rewritten.append(line.replace(stripped, abs_url, 1))
             count += 1
-        else:
-            rewritten.append(line)
+            continue
+        # Relative path → absolute via base_url
+        abs_url = urljoin(base_url, stripped)
+        rewritten.append(line.replace(stripped, abs_url, 1))
+        count += 1
 
     return "".join(rewritten), count
 

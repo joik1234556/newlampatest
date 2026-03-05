@@ -37,8 +37,8 @@
         try { console.log.apply(console, ['[Easy-Mod]'].concat([].slice.call(arguments))); } catch (e) {}
     }
     log('loaded v' + VERSION);
-    // ScrapingBee is used server-side for Zetflix (controlled by USE_SCRAPINGBEE in .env)
-    console.log('[Easy-Mod] Using ScrapingBee for Zetflix');
+    // Cloudflare Workers proxy is used server-side for Zetflix scraping
+    console.log('[Easy-Mod] Using CF Workers proxy for Zetflix');
 
     // -------------------------------------------------------
     // CSS — EXACT copy of modss_online_css template + easy-mod extras
@@ -109,12 +109,13 @@
         ".em-tag--voice{background:rgba(181,141,54,.35)}",
         ".em-tag--lang{background:rgba(24,143,223,.35)}",
         ".em-tag--quality{background:rgba(76,175,80,.25)}",
-        // Online provider (Rezka, Kinogo, etc.) card highlight
+        // Online provider (Rezka, Kinogo, Zetflix, etc.) card highlight
         ".online-variant{border-left:4px solid #00c853;background:rgba(0,200,83,.08)}",
         ".online-variant.focus{background:rgba(0,200,83,.18)}",
+        ".online-variant .online_modss__body{border-left:3px solid #00c853}",
         ".em-online-badge{position:absolute;top:.5em;left:.5em;background:#00c853;color:#fff;padding:.15em .5em;border-radius:.3em;font-size:.75em;font-weight:700}",
         // Section headers (Online vs Easy-Mod dividers)
-        ".em-section-header{display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;gap:.6em;padding:.5em 0 .7em;font-size:1em;font-weight:700;opacity:.9;margin-top:.5em}",
+        ".em-section-header{display:-webkit-box;display:flex;-webkit-box-align:center;align-items:center;gap:.6em;padding:.5em 0 .7em;font-size:1.1em;font-weight:700;opacity:.9;margin-top:.5em;letter-spacing:.02em}",
         ".em-section-header:first-child{margin-top:0}",
         ".em-section-header__line{-webkit-box-flex:1;flex:1;height:1px;background:rgba(255,255,255,.15)}",
         ".em-section-online .em-section-header{color:#00c853}",
@@ -252,6 +253,9 @@
         try {
             var item = { title: title, url: url };
             if (poster) { item.poster = poster; }
+            if (url.toLowerCase().indexOf('.m3u8') !== -1 || url.toLowerCase().indexOf('/hls/') !== -1) {
+                item.type = 'hls';
+            }
             Lampa.Player.play(item);
         } catch (e) { log('play error', e.message); }
     }
@@ -339,12 +343,13 @@
         if (v.seeders) {
             imgWrap.append(jq('<div class="em-seeders">').text('\u2b06 ' + v.seeders));
         }
-        // Online badge (top-left) — shown for online providers like Rezka/Kinogo
-        var _ONLINE_SRC = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1 };
+        // Online badge (top-left) — shown for online providers like Rezka/Kinogo/Zetflix
+        var _ONLINE_SRC = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1, zetflix: 1 };
+        var _srcLabel   = { rezka: 'HDRezka', zetflix: 'Zetflix', kinogo: 'Kinogo', videocdn: 'VideoCDN', kodik: 'Kodik' };
         var _onlineSrc = v.source && _ONLINE_SRC[v.source];
         if (_onlineSrc) {
             card.addClass('online-variant');
-            imgWrap.append(jq('<div class="em-online-badge">').text('Online'));
+            imgWrap.append(jq('<div class="em-online-badge">').text(_srcLabel[v.source] || 'Online'));
         } else if (v.is_cached) {
             // ⚡ Cached badge (instant play) — only for torrent-based variants
             imgWrap.append(jq('<div class="em-cached-badge">').text('\u26a1 \u041c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u043e'));
@@ -1176,7 +1181,7 @@
         // 1. Source selector
         var srcSel2 = buildSourceSelector(self._activeSource, function (key) {
             self._activeSource  = key;
-            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : '';
+            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : (key === 'zetflix') ? 'zetflix' : '';
             self._allVariants   = [];
             self._filterVoice   = '';
             self._filterQuality = '';
@@ -1886,12 +1891,16 @@
             m = (act && (act.movie || act.card || act.data)) || {};
         } catch (ex) {}
 
-        var btn = jq('<div class="full-start__button selector view--easy_mod">')
-            .append(jq(BTN_ICO))
-            .append(jq('<span>').text('Easy-Mod'));
+        var btn = jqSafe('<div class="full-start__button selector view--easy_mod">')
+            .attr('data-ctrl-left', '')
+            .attr('data-ctrl-right', '');
+        btn.append(jqSafe('<div class="full-start__button-ico">').html(BTN_ICO));
+        btn.append(jqSafe('<div class="full-start__button-name">').text('Easy-Mod'));
 
         btn.on('hover:enter click', function () {
-            btn.html(BTN_SPIN + '<span>\u041f\u043e\u0438\u0441\u043a\u2026</span>');
+            btn.empty();
+            btn.append(jqSafe('<div class="full-start__button-ico">').html(BTN_SPIN));
+            btn.append(jqSafe('<div class="full-start__button-name">').text('\u041f\u043e\u0438\u0441\u043a\u2026'));
 
             // Always re-read current movie from Activity at click time to avoid stale closures
             var movie = {};
@@ -1907,7 +1916,11 @@
             log('open variants for', (movie && (movie.title || movie.name)) || '?');
 
             setTimeout(function () {
-                try { btn.html(BTN_ICO + '<span>Easy-Mod</span>'); } catch (e) {}
+                try {
+                    btn.empty();
+                    btn.append(jqSafe('<div class="full-start__button-ico">').html(BTN_ICO));
+                    btn.append(jqSafe('<div class="full-start__button-name">').text('Easy-Mod'));
+                } catch (e) {}
             }, 1500);
 
             try {
@@ -1919,7 +1932,11 @@
                 });
             } catch (err) {
                 log('Activity.push error', err.message);
-                try { btn.html(BTN_ICO + '<span>Easy-Mod</span>'); } catch (e) {}
+                try {
+                    btn.empty();
+                    btn.append(jqSafe('<div class="full-start__button-ico">').html(BTN_ICO));
+                    btn.append(jqSafe('<div class="full-start__button-name">').text('Easy-Mod'));
+                } catch (e) {}
             }
         });
 

@@ -98,6 +98,9 @@ ENABLE_DEMO_PROVIDER: bool = os.getenv("ENABLE_DEMO_PROVIDER", "0") == "1"
 # fast-path hit (skip Jackett/Torrentio for popular titles).
 TORBOX_SEARCH_MIN_RESULTS: int = int(os.getenv("TORBOX_SEARCH_MIN_RESULTS", "3"))
 
+# Cloudflare Workers proxy for Zetflix scraping
+CF_PROXY_URL: str = os.getenv("CF_PROXY_URL", "https://lampaproxy.egorkorotkov5.workers.dev/")
+
 # === SCRAPINGBEE CONFIG ===
 # API key — set SCRAPINGBEE_API_KEY in .env (never hardcode here)
 SCRAPINGBEE_API_KEY: str = os.getenv("SCRAPINGBEE_API_KEY", "")

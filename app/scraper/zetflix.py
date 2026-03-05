@@ -18,12 +18,12 @@ import asyncio
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urljoin, urlparse, urlencode, quote as _quote
 
 from bs4 import BeautifulSoup
 
 from app.scraper import cloudscraper_get, try_mirrors
-from app.config import ZETFLIX_MIRRORS
+from app.config import ZETFLIX_MIRRORS, PROXY_M3U8_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +257,22 @@ async def get_detail(url: str) -> dict:
             poster = urljoin(base_url, poster)
 
     files = _extract_player_iframes(soup, base_url)
+
+    # === ZETFLIX PROXY ===
+    # Wrap m3u8 stream URLs so Lampa receives them via /proxy/m3u8 which
+    # adds CORS headers and rewrites relative segment paths to absolute CDN URLs.
+    # The .ts media segments themselves are served directly from CDN (no server traffic).
+    if PROXY_M3U8_ENABLED:
+        wrapped: list[dict] = []
+        for f in files:
+            file_url = f.get("url", "")
+            if file_url and ".m3u8" in file_url and file_url.startswith("http"):
+                proxied = f"/proxy/m3u8?url={_quote(file_url, safe='')}"
+                logger.debug("[ZETFLIX] Wrapped m3u8 url: %s", proxied)
+                wrapped.append({"quality": f.get("quality", "1080p"), "url": proxied})
+            else:
+                wrapped.append(f)
+        files = wrapped
 
     return {
         "title": title,

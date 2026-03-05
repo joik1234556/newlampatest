@@ -43,6 +43,7 @@ from app.routers import variants as variants_router
 from app.routers import stream as stream_router
 from app.routers import hdrezka as hdrezka_router
 from app.routers import zetflix as zetflix_router  # === ZETFLIX SOURCE ===
+from app.routers import proxy as proxy_router  # === PROXY M3U8 - ONLY PLAYLIST ===
 from app.providers.torrentio import TorrentioProvider
 from app.providers.jackett import JackettProvider, guess_quality, guess_codec, guess_voice, detect_language
 from app.models import Variant
@@ -125,6 +126,7 @@ app.include_router(variants_router.router)
 app.include_router(stream_router.router)
 app.include_router(hdrezka_router.router)
 app.include_router(zetflix_router.router)  # === ZETFLIX SOURCE ===
+app.include_router(proxy_router.router)  # === PROXY M3U8 - ONLY PLAYLIST ===
 
 # Serve static plugin files (e.g. /static/easy-mod.js)
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")

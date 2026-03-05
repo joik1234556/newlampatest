@@ -1,7 +1,6 @@
 """
 # === ZETFLIX SOURCE ===
 # === ZETFLIX v3 - M3U8 PROXY FIX ===
-# === SCRAPINGBEE INTEGRATION ===
 Zetflix scraper — search and detail parsing.
 
 Zetflix embeds its video via third-party players (Kodik, Alloha, Moonwalk, etc.).
@@ -10,11 +9,12 @@ The scraper:
   2. On the detail page extracts the embedded iframe src (player URL).
   3. Follows the iframe URL to extract the real m3u8 from the player JS
      (e.g. ``Playerjs({file:"https://...m3u8"})``, Kodik, Alloha patterns).
-  4. Returns wrapped /proxy/m3u8?url=... links so Lampa gets CORS headers.
+  4. Returns m3u8 links wrapped through the Cloudflare Workers proxy so Lampa
+     gets an absolute, CORS-friendly URL.
 
-When USE_SCRAPINGBEE=True (default), requests are routed through the ScrapingBee
-API to handle Cloudflare JS challenges and CORS automatically.  Set
-USE_SCRAPINGBEE=0 in .env to fall back to the legacy cloudscraper path.
+All HTTP requests are routed through the Cloudflare Workers proxy
+(``CLOUDFLARE_PROXY``) which handles User-Agent spoofing and Cloudflare
+JS challenges for free.  Falls back to ``cloudscraper_get`` on proxy errors.
 """
 from __future__ import annotations
 
@@ -30,52 +30,42 @@ from bs4 import BeautifulSoup
 from app.scraper import cloudscraper_get, try_mirrors
 from app.config import (
     ZETFLIX_MIRRORS,
-    PROXY_M3U8_ENABLED,
-    # === SCRAPINGBEE INTEGRATION ===
-    SCRAPINGBEE_API_KEY,
-    USE_SCRAPINGBEE,
-    SCRAPINGBEE_RENDER_JS,
-    SCRAPINGBEE_PREMIUM_PROXY,
-    SCRAPINGBEE_COUNTRY,
 )
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# === SCRAPINGBEE INTEGRATION === HTTP helper
+# Cloudflare Workers proxy helper
 # ---------------------------------------------------------------------------
 
-_SCRAPINGBEE_ENDPOINT = "https://app.scrapingbee.com/api/v1/"
+CLOUDFLARE_PROXY = "https://lampaproxy.egorkorotkov5.workers.dev/"
 
 
-def _scrapingbee_get(url: str) -> str:
+def _proxy_get(url: str) -> str:
     """
-    # === SCRAPINGBEE INTEGRATION ===
-    Fetch *url* via the ScrapingBee API.
-
-    ScrapingBee handles JS rendering and premium proxies, which solves both
-    Cloudflare challenges and CORS issues that the Zetflix mirrors present.
-
-    Falls back to ``cloudscraper_get`` if USE_SCRAPINGBEE is False or
-    SCRAPINGBEE_API_KEY is not set.
+    Fetch url via the Cloudflare Workers proxy.
+    The proxy automatically sets correct User-Agent, Origin, Referer headers
+    and bypasses Cloudflare JS challenges.
+    Falls back to cloudscraper_get if proxy request fails.
     """
-    if not USE_SCRAPINGBEE or not SCRAPINGBEE_API_KEY:
-        logger.debug("[SCRAPINGBEE] Fallback to cloudscraper for url=%s", url)
+    proxy_url = CLOUDFLARE_PROXY + url
+    logger.info("[ZETFLIX PROXY] Fetching via CF worker: %s", url)
+    try:
+        resp = httpx.get(
+            proxy_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0.0.0 Safari/537.36",
+            },
+            timeout=30,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        logger.info("[ZETFLIX PROXY] OK status=%s for %s", resp.status_code, url)
+        return resp.text
+    except Exception as exc:
+        logger.warning("[ZETFLIX PROXY] Failed for %s: %s — falling back to cloudscraper", url, exc)
         return cloudscraper_get(url)
-
-    params: dict[str, str] = {
-        "api_key": SCRAPINGBEE_API_KEY,
-        "url": url,
-        "render_js": "true" if SCRAPINGBEE_RENDER_JS else "false",
-        "premium_proxy": "true" if SCRAPINGBEE_PREMIUM_PROXY else "false",
-        "country_code": SCRAPINGBEE_COUNTRY,
-    }
-    logger.info("[SCRAPINGBEE] Request sent to: %s", url)
-    resp = httpx.get(_SCRAPINGBEE_ENDPOINT, params=params, timeout=60)
-    logger.info("[SCRAPINGBEE] Response status: %s", resp.status_code)
-    resp.raise_for_status()
-    return resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -84,18 +74,20 @@ def _scrapingbee_get(url: str) -> str:
 
 def _wrap_m3u8_url(url: str) -> str:
     """
-    # === ZETFLIX PROXY ===
-    Wrap a raw m3u8 URL in the /proxy/m3u8 endpoint so Lampa gets CORS headers
-    and relative .ts links are rewritten to absolute CDN URLs.
-    Only wraps when PROXY_M3U8_ENABLED is True; returns the original URL otherwise.
+    Wrap a raw m3u8/mp4 URL through Cloudflare Workers proxy so Lampa
+    gets correct CORS headers and the URL is always absolute (playable).
     """
-    if not PROXY_M3U8_ENABLED:
+    if not url:
         return url
-    if ".m3u8" not in url.lower():
+    # Normalize protocol-relative URLs
+    if url.startswith("//"):
+        url = "https:" + url
+    if not url.startswith("http"):
         return url
-    from urllib.parse import quote
-    wrapped = f"/proxy/m3u8?url={quote(url, safe='')}"
-    logger.info("[ZETFLIX PROXY] Wrapped m3u8 url: %s", wrapped)
+    # Always proxy through CF worker — this gives Lampa an absolute,
+    # CORS-friendly URL that works even without the FastAPI backend running.
+    wrapped = CLOUDFLARE_PROXY + url
+    logger.info("[ZETFLIX PROXY] m3u8 wrapped: %s", wrapped)
     return wrapped
 
 
@@ -117,6 +109,24 @@ _IFRAME_M3U8_RE = re.compile(
 # Broader fallback regex: any quoted https URL containing .m3u8
 _BROAD_M3U8_RE = re.compile(r"""["'](https?://[^"'<>\s]+\.m3u8[^"'<>\s]*)["']""")
 
+# Kodik pattern: protocol-relative URLs like //cdn.kodik.info/...m3u8
+_KODIK_M3U8_RE = re.compile(
+    r'["\']?(//(?:cdn|cloud|st|stream)\.[^"\'<>\s]*\.m3u8[^"\'<>\s]*)["\']?',
+    re.IGNORECASE,
+)
+
+# Alloha pattern: JSON-encoded stream URLs
+_ALLOHA_URL_RE = re.compile(
+    r'"hls"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
+    re.IGNORECASE,
+)
+
+# Generic: any URL with .m3u8 including after query params
+_ANY_M3U8_RE = re.compile(
+    r'["\s]?(https?://[^\s"\'<>]+\.m3u8(?:[^\s"\'<>]*)?)["\s]?',
+    re.IGNORECASE,
+)
+
 
 def _extract_m3u8_from_player_html(html: str) -> list[str]:
     """
@@ -127,17 +137,36 @@ def _extract_m3u8_from_player_html(html: str) -> list[str]:
     """
     found: list[str] = []
     seen: set[str] = set()
+
+    def _add(u: str) -> None:
+        if not u:
+            return
+        # Normalize protocol-relative
+        if u.startswith("//"):
+            u = "https:" + u
+        if not u.startswith("http"):
+            return
+        if u in seen:
+            return
+        seen.add(u)
+        found.append(u)
+
+    # Primary patterns
     for m in _IFRAME_M3U8_RE.finditer(html):
-        url = m.group(1)
-        if url and url not in seen:
-            seen.add(url)
-            found.append(url)
-    # Broader fallback: any quoted https URL containing .m3u8
+        _add(m.group(1))
+    # Broad fallback
     for m in _BROAD_M3U8_RE.finditer(html):
-        url = m.group(1)
-        if url and url not in seen:
-            seen.add(url)
-            found.append(url)
+        _add(m.group(1))
+    # Kodik protocol-relative
+    for m in _KODIK_M3U8_RE.finditer(html):
+        _add(m.group(1))
+    # Alloha JSON
+    for m in _ALLOHA_URL_RE.finditer(html):
+        _add(m.group(1))
+    # Any remaining m3u8 URL
+    for m in _ANY_M3U8_RE.finditer(html):
+        _add(m.group(1))
+
     logger.debug("[ZETFLIX DEBUG] _extract_m3u8_from_player_html found=%d", len(found))
     return found
 
@@ -148,21 +177,36 @@ async def _follow_iframe_for_m3u8(iframe_url: str) -> list[str]:
     Follow a player iframe URL, parse its HTML/JS, and return any m3u8 URLs found.
     Returns an empty list on any error (non-fatal — we fall back to the iframe URL).
 
-    Uses ScrapingBee when USE_SCRAPINGBEE=True so JS-rendered player pages are
+    Uses the Cloudflare Workers proxy so JS-rendered player pages are
     correctly parsed (Kodik, Alloha, etc.).
     """
     loop = asyncio.get_event_loop()
-    try:
-        # === SCRAPINGBEE INTEGRATION === use ScrapingBee for iframe pages too
-        html = await loop.run_in_executor(None, _scrapingbee_get, iframe_url)
-    except Exception as exc:
-        logger.debug("[ZETFLIX DEBUG] Could not fetch iframe url=%s: %s", iframe_url, exc)
-        return []
+    urls_to_try = [iframe_url]
+    # Kodik/Alloha often need autoplay=1 to expose stream URLs in JS
+    if "kodik" in iframe_url or "alloha" in iframe_url:
+        sep = "&" if "?" in iframe_url else "?"
+        urls_to_try.append(iframe_url + sep + "autoplay=1")
 
-    urls = _extract_m3u8_from_player_html(html)
-    for u in urls:
-        logger.info("[ZETFLIX DEBUG] Found m3u8 in iframe url=%s m3u8=%s", iframe_url, u)
-    return urls
+    all_found: list[str] = []
+    seen_iframe: set[str] = set()
+    for url_try in urls_to_try:
+        try:
+            html = await loop.run_in_executor(None, _proxy_get, url_try)
+        except Exception as exc:
+            logger.debug("[ZETFLIX DEBUG] Could not fetch iframe url=%s: %s", url_try, exc)
+            continue
+
+        urls = _extract_m3u8_from_player_html(html)
+        for u in urls:
+            if u not in seen_iframe:
+                seen_iframe.add(u)
+                all_found.append(u)
+                logger.info("[ZETFLIX DEBUG] Found m3u8 in iframe url=%s m3u8=%s", url_try, u)
+
+        if all_found:
+            break  # found something — no need to try more variants
+
+    return all_found
 
 
 def _guess_quality(text: str) -> str:
@@ -255,7 +299,7 @@ def _parse_search_results(html: str, base_url: str) -> list[dict]:
                 "source": "zetflix",
             })
 
-    logger.info("[SCRAPINGBEE] Found %d results", len(items))
+    logger.info("[ZETFLIX] Found %d results", len(items))
     return items
 
 
@@ -265,8 +309,7 @@ async def _search_mirror(mirror: str, query: str) -> list[dict]:
     search_url = f"{mirror}index.php?{qs}"
     loop = asyncio.get_event_loop()
     try:
-        # === SCRAPINGBEE INTEGRATION === route through ScrapingBee when enabled
-        html = await loop.run_in_executor(None, _scrapingbee_get, search_url)
+        html = await loop.run_in_executor(None, _proxy_get, search_url)
         results = _parse_search_results(html, mirror)
         if results:
             return results
@@ -276,7 +319,7 @@ async def _search_mirror(mirror: str, query: str) -> list[dict]:
     # Fallback: try ?s= query param (WordPress-style)
     try:
         search_url2 = f"{mirror}?s={query}"
-        html2 = await loop.run_in_executor(None, _scrapingbee_get, search_url2)
+        html2 = await loop.run_in_executor(None, _proxy_get, search_url2)
         return _parse_search_results(html2, mirror)
     except Exception as exc2:
         logger.debug("[Zetflix] search via ?s= failed mirror=%s: %s", mirror, exc2)
@@ -394,8 +437,7 @@ def _extract_player_iframes(
 
 async def get_detail(url: str) -> dict:
     loop = asyncio.get_event_loop()
-    # === SCRAPINGBEE INTEGRATION === use ScrapingBee for detail pages
-    html = await loop.run_in_executor(None, _scrapingbee_get, url)
+    html = await loop.run_in_executor(None, _proxy_get, url)
     soup = BeautifulSoup(html, "lxml")
 
     parsed = urlparse(url)

@@ -5,6 +5,7 @@
     window.__easy_mod_loaded = true;
 
     var VERSION = '6.6';
+    var LAMPA_PROXY = 'https://lampaproxy.egorkorotkov5.workers.dev/';
     var API_DEFAULT = 'http://46.225.222.255:8000';
     var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
 
@@ -37,8 +38,7 @@
         try { console.log.apply(console, ['[Easy-Mod]'].concat([].slice.call(arguments))); } catch (e) {}
     }
     log('loaded v' + VERSION);
-    // ScrapingBee is used server-side for Zetflix (controlled by USE_SCRAPINGBEE in .env)
-    console.log('[Easy-Mod] Using ScrapingBee for Zetflix');
+    log('Using Cloudflare Workers proxy for Zetflix:', LAMPA_PROXY);
 
     // -------------------------------------------------------
     // CSS — EXACT copy of modss_online_css template + easy-mod extras
@@ -252,6 +252,10 @@
         try {
             var item = { title: title, url: url };
             if (poster) { item.poster = poster; }
+            // For m3u8 streams, explicitly set the type so Lampa uses HLS player
+            if (url.indexOf('.m3u8') !== -1 || url.indexOf('m3u8') !== -1) {
+                item.type = 'hls';
+            }
             Lampa.Player.play(item);
         } catch (e) { log('play error', e.message); }
     }
@@ -1047,17 +1051,20 @@
                     var zf = files[zi];
                     if (!zf.url) { continue; }
                     // === ZETFLIX v3 - M3U8 PROXY FIX ===
-                    // Log when Zetflix proxy m3u8 URL is used (helps debugging CORS/CDN issues)
-                    if (zf.url.indexOf('/proxy/m3u8') !== -1) {
-                        log('[Easy-Mod] Using proxy for m3u8: ' + zf.url);
+                    // Ensure the URL is absolute and playable
+                    var ztUrl = zf.url;
+                    if (!/^https?:/.test(ztUrl) && ztUrl.indexOf('/proxy/m3u8') === 0) {
+                        // Old-style relative proxy URL — make it absolute using API base
+                        ztUrl = getApi() + ztUrl;
+                        log('[Zetflix] converted relative proxy URL to absolute:', ztUrl.slice(0, 80));
                     }
                     // Use URL slice as unique suffix to avoid ID collisions on same-quality entries
-                    var ztId = 'zetflix_' + (zf.quality || 'unknown') + '_' + zf.url.slice(-12).replace(/[^a-z0-9]/gi, '_');
+                    var ztId = 'zetflix_' + (zf.quality || 'unknown') + '_' + ztUrl.slice(-12).replace(/[^a-z0-9]/gi, '_');
                     zetflixData.push({
                         id:        ztId,
                         label:     'Zetflix \u2022 RU \u2022 ' + (zf.quality || '?').toUpperCase() + ' (Online)',
                         quality:   zf.quality || 'unknown',
-                        url:       zf.url,
+                        url:       ztUrl,
                         source:    'zetflix',
                         language:  'ru',
                         voice:     'RU',

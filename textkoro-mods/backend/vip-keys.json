@@ -1,0 +1,16 @@
+{
+  "keys": [
+    {
+      "key": "EASYMODS-TRIAL-2026",
+      "label": "trial",
+      "active": true,
+      "expiresAt": "2027-01-01T00:00:00.000Z"
+    },
+    {
+      "key": "EASYMODS-VIP-FOREVER",
+      "label": "lifetime",
+      "active": true,
+      "expiresAt": null
+    }
+  ]
+}

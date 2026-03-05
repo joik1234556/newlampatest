@@ -1,0 +1,319 @@
+"""TorBox API client."""
+from __future__ import annotations
+
+import logging
+import os
+from urllib.parse import urlparse
+from typing import Any, Optional
+
+import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from app.config import TORBOX_API_KEY, TORBOX_BASE_URL
+
+logger = logging.getLogger(__name__)
+
+_HEADERS = {"Authorization": f"Bearer {TORBOX_API_KEY}"}
+
+# Persistent connection pool — reused across all requests in the same worker
+# process.  Limits: 20 total connections (handles burst of concurrent polls
+# from 30-50 users), 10 keepalive slots (reuses TLS sessions).
+# Thread-safety note: gunicorn uses separate OS processes (not threads) for each
+# worker, so each process has its own isolated _shared_client.  Within a single
+# async event loop there is no concurrent access to _client() because the
+# assignment is a single bytecode operation.
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+def _client() -> httpx.AsyncClient:
+    """Return the module-level shared AsyncClient, creating it on first call."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            headers=_HEADERS,
+            timeout=30,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _shared_client
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+async def _get(path: str, params: dict | None = None) -> Any:
+    resp = await _client().get(f"{TORBOX_BASE_URL}{path}", params=params)
+    if not resp.is_success:
+        logger.error("TorBox GET %s status=%d body=%.300s", path, resp.status_code, resp.text)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+async def _post(path: str, data: dict | None = None) -> Any:
+    resp = await _client().post(f"{TORBOX_BASE_URL}{path}", data=data)
+    if not resp.is_success:
+        logger.error("TorBox POST %s status=%d body=%.300s", path, resp.status_code, resp.text)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+async def get_user_info() -> dict:
+    """Return current TorBox user info (used as a health-check)."""
+    return await _get("/user/me")
+
+
+async def get_torrent_list(bypass_cache: bool = False) -> list[dict]:
+    """Return list of user's torrents.
+
+    Pass ``bypass_cache=True`` to force TorBox to skip its server-side cache
+    and return a fully fresh response including the ``files`` list for each
+    torrent.  Needed in Fast-Path A so we can retrieve file IDs for an
+    already-seeding torrent without waiting for the next polling cycle.
+    """
+    params: dict | None = {"bypass_cache": "true"} if bypass_cache else None
+    result = await _get("/torrents/mylist", params=params)
+    return result.get("data", [])
+
+
+async def add_magnet(magnet: str) -> dict:
+    """Add a magnet link to TorBox and return the created torrent record."""
+    result = await _post("/torrents/createtorrent", data={"magnet": magnet})
+    logger.info("TorBox createtorrent response: %s", result)
+    return result
+
+
+async def add_torrent_from_url(torrent_url: str) -> dict:
+    """
+    Download a .torrent file from ``torrent_url`` and upload it to TorBox.
+    Used as a fallback when Jackett provides a Link instead of a MagnetUri.
+    """
+    # Validate URL to prevent SSRF — only allow http(s) to public hosts
+    _parsed = urlparse(torrent_url)
+    if _parsed.scheme not in ("http", "https"):
+        raise ValueError(f"torrent_url must use http or https scheme, got: {_parsed.scheme!r}")
+    hostname = _parsed.hostname or ""
+    if not hostname:
+        raise ValueError("torrent_url has no hostname")
+    # Block internal/private networks
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError(f"torrent_url resolves to a private/internal address: {hostname}")
+    except ValueError as exc:
+        # Not a raw IP — check for localhost by name
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1"):
+            raise ValueError(f"torrent_url hostname not allowed: {hostname}") from exc
+    logger.info("TorBox add_torrent_from_url url=%.80s", torrent_url)
+    async with httpx.AsyncClient(timeout=30) as dl_client:
+        # follow_redirects=False prevents redirect-based SSRF
+        file_resp = await dl_client.get(torrent_url, follow_redirects=False)
+        if file_resp.is_redirect:
+            raise ValueError("torrent_url returned a redirect; redirects are not followed for security")
+        file_resp.raise_for_status()
+        torrent_bytes = file_resp.content
+
+    # Derive a meaningful filename from the URL for easier debugging
+    parsed_path = urlparse(torrent_url).path
+    filename = os.path.basename(parsed_path) or "file.torrent"
+    if not filename.endswith(".torrent"):
+        filename += ".torrent"
+
+    resp = await _client().post(
+            f"{TORBOX_BASE_URL}/torrents/createtorrent",
+            files={"torrent": (filename, torrent_bytes, "application/x-bittorrent")},
+        )
+    if not resp.is_success:
+        logger.error(
+            "TorBox upload torrent status=%d body=%.300s", resp.status_code, resp.text
+        )
+    resp.raise_for_status()
+    result = resp.json()
+    logger.info("TorBox createtorrent (url upload) response: %s", result)
+    return result
+
+
+async def request_download_link(torrent_id: int | str, file_id: int | str) -> str | None:
+    """Request a direct download URL for a file inside a torrent."""
+    # TorBox requires the API token both via the Authorization header AND as the
+    # ?token= query parameter for the /requestdl endpoint.
+    logger.debug("TorBox requestdl using Authorization header + token param")
+    result = await _get(
+        "/torrents/requestdl",
+        params={
+            "torrent_id": str(torrent_id),
+            "file_id": str(file_id),
+            "token": TORBOX_API_KEY,
+        },
+    )
+    logger.info("TorBox requestdl response: %s", result)
+    return result.get("data")
+
+
+async def check_cached(infohash: str) -> bool:
+    """Check whether a torrent is already cached in TorBox."""
+    try:
+        result = await _get(
+            "/torrents/checkcached",
+            params={"hash": infohash.lower(), "format": "list"},
+        )
+        data = result.get("data") or []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and item.get("hash", "").lower() == infohash.lower():
+                    return bool(item.get("cached"))
+            return False
+        if isinstance(data, dict):
+            return bool(data.get(infohash.lower(), False))
+        return bool(data)
+    except Exception as exc:
+        logger.warning("TorBox checkcached error: %s", exc)
+        return False
+
+
+async def batch_check_cached(infohashes: list[str]) -> dict[str, bool]:
+    """
+    Batch-check whether torrents are already cached in TorBox.
+
+    Sends a single GET request with a comma-separated list of infohashes.
+    Returns a dict {infohash_lower → bool}.
+
+    Falls back to all-False on any error so callers can continue normally.
+    """
+    if not infohashes:
+        return {}
+    if not TORBOX_API_KEY:
+        return {}
+    try:
+        hashes_csv = ",".join(h.lower() for h in infohashes if h)
+        resp = await _client().get(
+            f"{TORBOX_BASE_URL}/torrents/checkcached",
+            params={"hash": hashes_csv, "format": "list"},
+        )
+        if not resp.is_success:
+            logger.warning("TorBox batch_check_cached status=%d", resp.status_code)
+            return {}
+        result = resp.json()
+        data = result.get("data") or []
+        if isinstance(data, list):
+            return {item["hash"].lower(): bool(item.get("cached")) for item in data if "hash" in item}
+        if isinstance(data, dict):
+            # Some TorBox versions return {hash: bool} directly
+            return {k.lower(): bool(v) for k, v in data.items()}
+        return {}
+    except Exception as exc:
+        logger.warning("TorBox batch_check_cached error: %s", exc)
+        return {}
+
+
+async def get_torrent_by_id(torrent_id: int | str, bypass_cache: bool = False) -> dict | None:
+    """Return a single torrent record from mylist by id."""
+    try:
+        torrents = await get_torrent_list(bypass_cache=bypass_cache)
+        for t in torrents:
+            if str(t.get("id")) == str(torrent_id):
+                return t
+    except Exception as exc:
+        logger.error("TorBox get_torrent_by_id error: %s", exc)
+    return None
+
+
+async def get_torrent_by_hash(infohash: str, bypass_cache: bool = False) -> dict | None:
+    """Return a single torrent record from mylist by info-hash (hex, lowercase)."""
+    ih = infohash.lower()
+    try:
+        torrents = await get_torrent_list(bypass_cache=bypass_cache)
+        for t in torrents:
+            if (t.get("hash") or "").lower() == ih:
+                return t
+    except Exception as exc:
+        logger.error("TorBox get_torrent_by_hash error: %s", exc)
+    return None
+
+
+async def search_torbox(
+    query: str,
+    cached_only: bool = True,
+    limit: int = 20,
+) -> list[dict]:
+    """
+    Search TorBox's native torrent index via ``/torrents/search``.
+
+    Returns a list of torrent dicts (keys: ``hash``, ``name``, ``size``,
+    ``seeders``, ``peers``, ``files``, …).  Gracefully falls back to ``[]``
+    on any error so callers can always continue normally.
+
+    ``cached_only=True`` restricts results to torrents that TorBox already
+    has cached and can start streaming immediately.
+    """
+    if not TORBOX_API_KEY:
+        return []
+    params: dict[str, str] = {
+        "query": query,
+        "cached_only": "true" if cached_only else "false",
+        "limit": str(limit),
+    }
+    try:
+        result = await _get("/torrents/search", params=params)
+        data = result.get("data") or []
+        if isinstance(data, list):
+            logger.info(
+                "TorBox search '%s': %d result(s) (cached_only=%s)",
+                query, len(data), cached_only,
+            )
+            return data
+        return []
+    except Exception as exc:
+        logger.warning("TorBox search_torbox error for '%s': %s", query, exc)
+        return []
+
+
+def guess_quality(name: str) -> str:
+    """Guess video quality from a filename or label string."""
+    name_lower = name.lower()
+    for q in ("2160p", "4k", "1080p", "720p", "480p", "360p"):
+        if q in name_lower:
+            return q.upper() if q == "4k" else q
+    return "unknown"
+
+
+# Keep legacy private alias for backwards compatibility
+_guess_quality = guess_quality
+
+
+async def build_direct_links(
+    torrent_id: int | str, files: list[dict]
+) -> list[dict]:
+    """
+    Request direct download URLs for every file inside a torrent and return
+    a list of ``{ title, quality, url, size }`` dicts ready for the Lampa player.
+    """
+    result: list[dict] = []
+    for idx, f in enumerate(files):
+        file_id = f.get("id")
+        if file_id is None:
+            continue
+        try:
+            url = await request_download_link(torrent_id, file_id)
+            if url:
+                name = f.get("name") or f.get("short_name") or f"File {idx + 1}"
+                result.append(
+                    {
+                        "title": name,
+                        "quality": _guess_quality(name),
+                        "url": url,
+                        "size": f.get("size", 0),
+                    }
+                )
+        except Exception as exc:
+            logger.error(
+                "build_direct_links torrent_id=%s file_id=%s error: %s",
+                torrent_id, file_id, exc,
+            )
+    return result

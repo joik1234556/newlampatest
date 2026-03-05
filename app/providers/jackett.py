@@ -1,0 +1,796 @@
+"""
+Jackett provider — searches torrents via a self-hosted Jackett REST API.
+
+Requires environment variables:
+  JACKETT_URL      e.g. http://localhost:9117
+  JACKETT_API_KEY  Jackett API key
+
+If either is missing, this provider silently returns [].
+
+Jackett JSON endpoint:
+  GET {JACKETT_URL}/api/v2.0/indexers/all/results
+      ?apikey={key}&t=search&q={query}&cat=2000
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+import unicodedata
+from difflib import SequenceMatcher
+from typing import Optional
+
+import httpx
+
+from app.config import JACKETT_API_KEY, JACKETT_URL
+from app.models import Variant
+from app.providers.base import BaseProvider
+
+logger = logging.getLogger(__name__)
+
+# Shared async client — reuses TCP/TLS connections across requests (faster)
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Return a module-level shared httpx client, creating it on first call."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=20,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _http_client
+
+_QUALITY_RE = re.compile(r"(2160p|4k|uhd|1080p|720p|480p|360p)", re.IGNORECASE)
+_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+# Season patterns: "S01", "S1E01", "сезон 1", "season 1"
+_SEASON_RE = re.compile(r"\bS(\d{1,2})(?:E\d+)?\b|\bсезон\s*(\d+)\b|\bseason\s*(\d+)\b", re.IGNORECASE)
+# Season range packs: "S01-S05", "S1-S8", "S01-05"
+_SEASON_RANGE_RE = re.compile(r"\bS(\d{1,2})\s*[-–—]\s*S?(\d{1,2})\b", re.IGNORECASE)
+# Complete / full-series pack indicators (always relevant for any requested season)
+_COMPLETE_RE = re.compile(
+    r"\b(complete|full[\s._-]+series?|все[\s._-]+сезон|все[\s._-]+серии|полный[\s._-]+сериал)\b",
+    re.IGNORECASE,
+)
+
+# Technical tokens commonly appended to torrent titles (codec, quality, format, tracker …)
+_TECH_TOKENS_RE = re.compile(
+    r"\b(2160p|4k|uhd|1080p|720p|480p|360p|"
+    r"bluray|bdrip|brrip|webrip|web[-_.]?dl|dvdrip|hdtv|"
+    r"x264|x265|hevc|h264|h265|avc|xvid|divx|av1|"
+    r"multi|rus|eng|dub|sub(?:bed|titles?)?|srt|"
+    r"19\d{2}|20\d{2}|"
+    r"hdr10?|dolby|dts|ac3|aac|mp3|flac|"
+    r"yts|rarbg|cm8|galaxyrg|ettv|"
+    r"s\d{1,2}e\d{1,2}|s\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+# Same tokens but kept as Latin/ASCII — used to clean Cyrillic-titled candidates
+# before SequenceMatcher comparison (Cyrillic text is preserved, only ASCII tech
+# tokens are removed, so the real title words remain for similarity scoring).
+_CYRILLIC_TECH_RE = re.compile(
+    r"\b(?:2160p|4k|uhd|1080p|720p|480p|360p|"
+    r"bluray|bdrip|brrip|webrip|web[-_.]?dl|dvdrip|hdtv|remux|"
+    r"x264|x265|hevc|h264|h265|avc|xvid|divx|av1|"
+    r"multi|rus|eng|ukr|dub|sub(?:bed|titles?)?|srt|"
+    r"19\d{2}|20\d{2}|"
+    r"hdr10?|dolby|dts|ac3|aac|mp3|flac|"
+    r"yts|rarbg|cm8|galaxyrg|ettv|"
+    r"s\d{1,2}e\d{1,2}|s\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+# Newznab/Jackett movie category range
+_MOVIE_CAT_MIN = 2000
+_MOVIE_CAT_MAX = 2999
+
+# Maximum variants fetched per provider call — stops early HTTP requests
+MAX_VARIANTS = 20
+
+# Maximum characters for the human-readable card label (used by all providers)
+MAX_LABEL_LEN = 55
+
+# Known dubbing studio patterns (lowercased needle → display name)
+# Russian studios
+_VOICE_STUDIOS: list[tuple[str, str]] = [
+    ("lostfilm",     "LostFilm"),
+    ("лостфильм",    "LostFilm"),
+    ("baibako",      "BaibaKo"),
+    ("байбако",      "BaibaKo"),
+    ("novafilm",     "NovaFilm"),
+    ("nova film",    "NovaFilm"),
+    ("новафильм",    "NovaFilm"),
+    ("coldfilm",     "ColdFilm"),
+    ("newstudio",    "NewStudio"),
+    ("нью студио",   "NewStudio"),
+    ("amedia",       "Amedia"),
+    ("амедиа",       "Amedia"),
+    ("hdrezka",      "HDRezka"),
+    ("jaskier",      "Jaskier"),
+    ("яскер",        "Jaskier"),
+    ("яскір",        "Jaskier"),
+    ("жасмин",       "Жасмин"),
+    ("кубик в кубе", "Кубик"),
+    ("kubik",        "Кубик"),
+    ("юсупов",       "Юсупов"),
+    ("гоблин",       "Гоблин"),
+    ("goblin",       "Гоблин"),
+    ("колобок",      "Колобок"),
+    ("sdi media",    "SDI Media"),
+    # Ukrainian studios
+    ("кіноколія",    "Кіноколія"),
+    ("kinokoliya",   "Кіноколія"),
+    ("toloka",       "Toloka"),
+    ("толока",       "Toloka"),
+    ("postmodern",   "Postmodern"),
+    ("постмодерн",   "Postmodern"),
+    ("1+1",          "1+1"),
+    ("ictv",         "ICTV"),
+    ("новий канал",  "Новий канал"),
+    ("заголовки",    "Заголовки"),
+    ("zaholovky",    "Заголовки"),
+    ("tvci",         "TVci"),
+]
+# Regex patterns for language markers
+_DUB_RE = re.compile(r"\bdub\b|\bдубляж\b|\bдублирован", re.IGNORECASE)
+_SUB_RE = re.compile(r"\bsub(?:bed|title)?\b|\bсубтитры\b", re.IGNORECASE)
+_RU_LANG_RE = re.compile(r"\[(?:[^]]*\b(?:rus|рус)\b[^]]*)\]", re.IGNORECASE)
+_UA_LANG_RE = re.compile(
+    r"\bua\b|\bukr\b|\bukrain|\bукр\b|\bукраїн|\[ua\]|\[ukr\]",
+    re.IGNORECASE,
+)
+_MULTI_LANG_RE = re.compile(r"\bmulti\b|\bmulti[- ]?audio\b|\bмульти\b", re.IGNORECASE)
+_EN_LANG_RE = re.compile(r"\beng\b|\benglish\b|\[en\]", re.IGNORECASE)
+# Broad Russian indicators: [Rus], (rus), standalone "рус", "russian" in tag
+_RU_BROAD_RE = re.compile(
+    r"\brus\b|\brussian\b|\bрус(?:ская)?\b|\[rus\]|\(rus\)",
+    re.IGNORECASE,
+)
+
+
+def _detect_language(title: str) -> str:
+    """Return language code (ru/ua/en/multi) based on torrent title markers."""
+    if _MULTI_LANG_RE.search(title):
+        return "multi"
+    if _UA_LANG_RE.search(title):
+        return "ua"
+    if _RU_BROAD_RE.search(title) or _RU_LANG_RE.search(title):
+        return "ru"
+    if _EN_LANG_RE.search(title):
+        return "en"
+    return "ru"  # default: most CIS-region trackers use Russian when no language tag is present
+
+
+def _guess_voice(title: str) -> str:
+    """
+    Try to extract a dubbing studio or audio type from a torrent title.
+    Returns a short display string, or '' if nothing is recognised.
+    Ukrainian indicators take priority over generic RU patterns.
+    """
+    t = title.lower()
+    # Named studio match (highest priority — most specific)
+    for needle, display in _VOICE_STUDIOS:
+        if needle in t:
+            return display
+    # Ukrainian language marker
+    if _UA_LANG_RE.search(title):
+        return "Укр"
+    if _DUB_RE.search(title):
+        return "Дубляж"
+    if _SUB_RE.search(title):
+        return "Субтитры"
+    # e.g. "[Rus/Eng]" → infer Russian dub present
+    if _RU_LANG_RE.search(title):
+        return "RU"
+    return ""
+
+
+def _guess_quality(name: str) -> str:
+    m = _QUALITY_RE.search(name)
+    if not m:
+        return "1080p"
+    q = m.group(1).lower()
+    if q in ("4k", "uhd"):
+        return "2160p"
+    return q
+
+
+def _guess_codec(name: str) -> str:
+    t = name.lower()
+    if "x265" in t or "hevc" in t or "h265" in t:
+        return "H265"
+    if "av1" in t:
+        return "AV1"
+    return "H264"
+
+
+# ---------------------------------------------------------------------------
+# Public aliases — the _guess_* / _detect_* helpers above are module-private
+# by convention but are also useful to other modules (e.g. variants service).
+# ---------------------------------------------------------------------------
+detect_language = _detect_language
+guess_voice     = _guess_voice
+guess_quality   = _guess_quality
+guess_codec     = _guess_codec
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, strip accents/punctuation, collapse whitespace."""
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _strip_tech(text: str) -> str:
+    """Remove technical torrent metadata tokens to expose only the core title."""
+    t = _normalize(text)
+    t = _TECH_TOKENS_RE.sub(" ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _title_matches(query: str, candidate: str, threshold: float = 0.85) -> bool:
+    """Return True when *candidate* title is sufficiently similar to *query*.
+
+    Strategy:
+    1. Strip technical tokens (resolution, codec, year, tracker, …) from the
+       candidate so "Inception 2010 1080p BluRay x264" becomes "inception".
+    2. All query words must appear in the stripped candidate (word-boundary check).
+    3. Fall back to SequenceMatcher ratio on the stripped forms.
+
+    Threshold 0.85 was raised from 0.82 to reduce false positives from text search.
+    The year filter (_year_ok) provides additional protection.
+
+    Cyrillic handling:
+    - If the query normalises to empty (pure Cyrillic) AND the candidate has no
+      meaningful ASCII title content (c_stripped is empty — only tech tokens were
+      ASCII), perform a SequenceMatcher comparison on Cyrillic-cleaned forms.
+      ``_CYRILLIC_TECH_RE`` strips ASCII technical tokens while preserving
+      Cyrillic title words, which allows accurate similarity scoring without the
+      false-positive substring match ("Дюна" must NOT match "Дюна: Часть вторая").
+    - If the query is Cyrillic but the candidate HAS meaningful ASCII content
+      (c_stripped non-empty, e.g. "dune"), return False so the caller can retry
+      with the English original_title.
+    """
+    q = _normalize(query)
+    c_stripped = _strip_tech(candidate)
+    if not q:
+        # Query is fully non-ASCII (e.g. pure Cyrillic).
+        # c_stripped is empty when the candidate's only ASCII was technical tokens
+        # (year, resolution, codec …), meaning the title itself is Cyrillic.
+        if c_stripped:
+            # Candidate has meaningful ASCII title content — different script.
+            # Let the caller retry with the English original_title.
+            return False
+        # Both query and candidate are effectively non-ASCII (Cyrillic-only tracker).
+        # Strip ASCII technical tokens from both sides, then use SequenceMatcher.
+        # This avoids the false-positive substring match that caused short queries
+        # like "Дюна" to incorrectly match longer titles like "Дюна: Часть вторая".
+        q_clean = _CYRILLIC_TECH_RE.sub(" ", query.lower())
+        q_clean = re.sub(r"\s+", " ", q_clean).strip()
+        c_clean = _CYRILLIC_TECH_RE.sub(" ", candidate.lower())
+        c_clean = re.sub(r"\s+", " ", c_clean).strip()
+        return SequenceMatcher(None, q_clean, c_clean).ratio() >= threshold
+    # Direct containment after stripping technical tokens
+    if q in c_stripped:
+        return True
+    # All words in the query must appear as whole words in the stripped candidate
+    q_words = q.split()
+    if q_words and all(re.search(r"\b" + re.escape(w) + r"\b", c_stripped) for w in q_words):
+        return True
+    # SequenceMatcher on stripped forms (shorter strings → higher ratios)
+    return SequenceMatcher(None, q, c_stripped).ratio() >= threshold
+
+
+def _is_movie_category(cats: "list[int] | int | None") -> bool:
+    """Return True if the result belongs to a movie category or has no/unknown category."""
+    if not cats:
+        return True  # no category info — don't discard
+    if isinstance(cats, int):
+        cats = [cats]
+    # Accept if any entry is zero (unclassified), or falls in the movie range
+    return any(c == 0 or _MOVIE_CAT_MIN <= c <= _MOVIE_CAT_MAX for c in cats)
+
+
+def _year_ok(title_r: str, year: Optional[int]) -> bool:
+    """
+    Return True when the torrent title is acceptable for the requested year.
+    - If no year was requested, always accept.
+    - If the torrent title contains no year at all, accept (many valid torrents omit it).
+    - If it contains a year, accept with ±1 tolerance.
+    """
+    if not year:
+        return True
+    years_in_title = [int(m) for m in _YEAR_RE.findall(title_r)]
+    if not years_in_title:
+        return True  # no year in torrent title — keep it
+    return any(abs(y - year) <= 1 for y in years_in_title)
+
+
+def _title_or_orig_matches(
+    title: str,
+    original_title: Optional[str],
+    candidate: str,
+    threshold: float = 0.50,
+) -> bool:
+    """Return True if *candidate* matches *title* or *original_title* at *threshold*."""
+    if _title_matches(title, candidate, threshold=threshold):
+        return True
+    return bool(original_title and _title_matches(original_title, candidate, threshold=threshold))
+
+
+class JackettProvider(BaseProvider):
+    """Fetch torrent search results from a Jackett instance."""
+
+    name = "jackett"
+
+    @staticmethod
+    def _is_cyrillic(text: str) -> bool:
+        """Return True when *text* contains at least one Cyrillic letter."""
+        return bool(re.search(r"[а-яёїієА-ЯЁЇІЄ]", text))
+
+    def _build_queries(
+        self,
+        title: str,
+        year: Optional[int],
+        original_title: Optional[str],
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
+    ) -> list[str]:
+        """Build ordered list of query strings to try, most specific first.
+
+        When the display ``title`` is Cyrillic (Ukrainian/Russian) and
+        ``original_title`` is Latin (English), the Latin title is tried *first*
+        so international Jackett indexers — which don't index Cyrillic titles —
+        are hit with the correct English query.  The Cyrillic title follows as a
+        fallback for CIS-region trackers.
+        """
+        seen: set[str] = set()
+        queries: list[str] = []
+
+        def add(q: str) -> None:
+            key = q.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                queries.append(q)
+
+        # Detect Cyrillic-vs-Latin mismatch so we can prioritise the Latin title
+        # for international trackers (they never index Cyrillic titles).
+        _orig_differs = bool(original_title and original_title.lower() != title.lower())
+        _title_is_cyrillic = self._is_cyrillic(title)
+        _orig_is_latin = _orig_differs and not self._is_cyrillic(original_title or "")
+        # When title is Cyrillic AND original_title is Latin, swap primary/secondary
+        # so the Latin (English) query is sent first — better for international indexers.
+        _primary   = original_title if (_title_is_cyrillic and _orig_is_latin) else title
+        _secondary = title          if (_title_is_cyrillic and _orig_is_latin) else original_title
+        # Base for UKR-suffix queries: always prefer the Latin title when available.
+        _latin_base = original_title if _orig_is_latin else _primary
+
+        if season and episode:
+            # Episode-specific queries: S01E03 format (most specific)
+            s2 = f"{season:02d}"
+            e2 = f"{episode:02d}"
+            add(f"{_primary} S{s2}E{e2}")
+            if _orig_differs:
+                add(f"{_secondary} S{s2}E{e2}")
+        elif season:
+            # Season-specific queries: Cyrillic + Latin formats
+            s2 = f"{season:02d}"
+            add(f"{_primary} S{s2}")
+            # Always add the Cyrillic season format so CIS-region trackers are covered
+            add(f"{title} сезон {season}")
+            add(f"{_primary} Season {season}")
+            if _orig_differs:
+                add(f"{_secondary} S{s2}")
+            # Ukrainian suffix variants
+            add(f"{_latin_base} S{s2} UKR")
+        else:
+            # Primary: title + year (most specific — avoids picking up unrelated films)
+            if year:
+                add(f"{_primary} {year}")
+                if _orig_differs:
+                    add(f"{_secondary} {year}")
+            # Secondary: title alone (catches results that omit the year)
+            add(_primary)
+            if _orig_differs:
+                add(_secondary)
+            # Ukrainian language variants (catches [UA], UKR, Ukrainian dubs)
+            if year:
+                add(f"{_latin_base} {year} UKR")
+            add(f"{_latin_base} UKR")
+
+        return queries
+
+    def _season_ok(self, title_r: str, season: Optional[int]) -> bool:
+        """
+        When a season is requested, check that the torrent title targets that season.
+        - If no season requested, always accept.
+        - Complete-series packs ("Complete", "Full Series", "Все сезоны") are always
+          relevant regardless of the specific season requested.
+        - Season range packs ("S01-S05") are accepted when the requested season falls
+          within the range.
+        - If torrent title has no season indicator at all, keep it (may be a full-series pack).
+        - If it has a season indicator, accept only if it matches.
+        """
+        if not season:
+            return True
+        # "Complete Series", "Full Series", "Все сезоны" etc. — accept for any season
+        if _COMPLETE_RE.search(title_r):
+            return True
+        # Season range packs e.g. "S01-S05": accept if requested season is within range
+        m_range = _SEASON_RANGE_RE.search(title_r)
+        if m_range:
+            s_start = int(m_range.group(1))
+            s_end   = int(m_range.group(2))
+            return s_start <= season <= s_end
+        m = _SEASON_RE.search(title_r)
+        if not m:
+            return True  # no season marker — could be a full-series pack; keep it
+        found_str = m.group(1) or m.group(2) or m.group(3) or "0"
+        found = int(found_str)
+        return found == season
+
+    async def _id_search(
+        self,
+        url: str,
+        params: dict,
+        seen_magnets: set,
+        variants: list,
+        season: Optional[int] = None,
+        title: Optional[str] = None,
+        original_title: Optional[str] = None,
+        year: Optional[int] = None,
+    ) -> None:
+        """Execute one ID-based Jackett call and append valid variants.
+
+        Even for ID-based (imdbid/tmdbid) searches we apply a lenient title
+        check (threshold 0.50) to filter out completely wrong results that some
+        Jackett indexers return when they fall back to internal text search.
+        Year and season filters are also applied.
+        """
+        try:
+            client = _get_http_client()
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            for r in data.get("Results") or []:
+                title_r = r.get("Title", "")
+                magnet = r.get("MagnetUri") or ""
+                if not magnet.startswith("magnet:?xt=urn:btih"):
+                    continue
+                if season and not self._season_ok(title_r, season):
+                    continue
+                # Lenient title check: catches completely wrong films returned by
+                # indexers that don't properly support imdbid/tmdbid lookup.
+                if title:
+                    if not _year_ok(title_r, year):
+                        logger.debug(
+                            "[JackettProvider][ID] skip '%s': year mismatch (want %s)",
+                            title_r, year,
+                        )
+                        continue
+                    if not _title_or_orig_matches(title, original_title, title_r):
+                        logger.debug(
+                            "[JackettProvider][ID] skip '%s': title mismatch (query='%s')",
+                            title_r, title,
+                        )
+                        continue
+                if magnet in seen_magnets:
+                    continue
+                seen_magnets.add(magnet)
+                seeders  = int(r.get("Seeders", 0) or 0)
+                size_mb  = int(r.get("Size", 0) or 0) // (1024 * 1024)
+                quality  = _guess_quality(title_r)
+                codec    = _guess_codec(title_r)
+                voice    = _guess_voice(title_r)
+                vid = hashlib.sha1(
+                    f"jackett:{title_r}:{quality}:{seeders}".encode()
+                ).hexdigest()[:12]
+                label = f"{voice} • {quality.upper()}" if voice else title_r[:MAX_LABEL_LEN].rstrip(" .-")
+                variants.append(Variant(
+                    id=vid, label=label, language=_detect_language(title_r), voice=voice,
+                    quality=quality, size_mb=size_mb, seeders=seeders,
+                    codec=codec, magnet=magnet,
+                ))
+        except Exception as exc:
+            logger.warning("[JackettProvider] ID search error: %s", exc)
+
+    async def _search_ukrainian(
+        self,
+        url: str,
+        title: str,
+        original_title: Optional[str],
+        year: Optional[int],
+        season: Optional[int],
+        seen_magnets: set,
+        variants: list,
+    ) -> None:
+        """
+        Run Ukrainian-dubbed text queries against Jackett and append matching
+        variants to ``variants``.  This is called even when ID-based search was
+        used so that Ukrainian-dubbed packs (tagged [UA] / UKR) are always
+        surfaced — they are rarely indexed by IMDB/TMDB-based searches because
+        CIS-region trackers use custom title strings.
+        """
+        base = original_title if (original_title and original_title.lower() != title.lower()) else title
+        cat_str = (
+            "2000,2010,2020,2030,2040,2045,2050,2060,5000,5030,5040,5045"
+            if season
+            else "2000,2010,2020,2030,2040,2045,2050,2060"
+        )
+        queries: list[str] = []
+        if season:
+            queries.append(f"{base} S{season:02d} UKR")
+            queries.append(f"{base} сезон {season} укр")
+        else:
+            if year:
+                queries.append(f"{base} {year} UKR")
+            queries.append(f"{base} UKR")
+            queries.append(f"{base} укр")
+
+        for query in queries:
+            params: dict[str, str] = {
+                "apikey": JACKETT_API_KEY,
+                "t": "search",
+                "q": query,
+                "cat": cat_str,
+            }
+            logger.info("[JackettProvider] UKR query=%s", query)
+            try:
+                client = _get_http_client()
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                logger.warning("[JackettProvider] UKR query error '%s': %s", query, exc)
+                continue
+
+            added = 0
+            for r in data.get("Results") or []:
+                title_r = r.get("Title", "")
+                # Accept only results that contain a Ukrainian language marker
+                if not _UA_LANG_RE.search(title_r):
+                    continue
+                magnet = r.get("MagnetUri") or ""
+                if not magnet.startswith("magnet:?xt=urn:btih"):
+                    continue
+                if season and not self._season_ok(title_r, season):
+                    continue
+                # Year + title validation to prevent wrong-film Ukrainian results
+                if not _year_ok(title_r, year):
+                    logger.debug(
+                        "[JackettProvider][UKR] skip '%s': year mismatch (want %s)",
+                        title_r, year,
+                    )
+                    continue
+                if not _title_or_orig_matches(title, original_title, title_r):
+                    logger.debug(
+                        "[JackettProvider][UKR] skip '%s': title mismatch (query='%s')",
+                        title_r, title,
+                    )
+                    continue
+                if magnet in seen_magnets:
+                    continue
+                seen_magnets.add(magnet)
+                seeders = int(r.get("Seeders", 0) or 0)
+                size_mb = int(r.get("Size", 0) or 0) // (1024 * 1024)
+                quality = _guess_quality(title_r)
+                codec   = _guess_codec(title_r)
+                voice   = _guess_voice(title_r) or "Укр"
+                vid = hashlib.sha1(
+                    f"jackett:{title_r}:{quality}:{seeders}".encode()
+                ).hexdigest()[:12]
+                label = f"{voice} • {quality.upper()}"
+                variants.append(Variant(
+                    id=vid, label=label, language="ua", voice=voice,
+                    quality=quality, size_mb=size_mb, seeders=seeders,
+                    codec=codec, magnet=magnet,
+                ))
+                added += 1
+            logger.info("[JackettProvider] UKR query=%s found %d new UA results", query, added)
+            if len(variants) >= MAX_VARIANTS:
+                break
+
+    async def search_variants(
+        self,
+        title: str,
+        year: Optional[int] = None,
+        tmdb_id: Optional[str] = None,
+        original_title: Optional[str] = None,
+        season: Optional[int] = None,
+        imdb_id: Optional[str] = None,
+        episode: Optional[int] = None,
+    ) -> list[Variant]:
+        if not JACKETT_URL or not JACKETT_API_KEY:
+            logger.debug("[JackettProvider] not configured, skipping")
+            return []
+
+        url = f"{JACKETT_URL.rstrip('/')}/api/v2.0/indexers/all/results"
+        # For TV series, also include TV categories (5000 range)
+        if season:
+            cat_str = "2000,2010,2020,2030,2040,2045,2050,2060,5000,5030,5040,5045"
+        else:
+            # Include all Newznab movie sub-categories:
+            # 2000=Movies, 2010=Movies/Foreign, 2020=Movies/Other,
+            # 2030=Movies/SD, 2040=Movies/HD, 2045=Movies/UHD,
+            # 2050=Movies/BluRay, 2060=Movies/3D
+            cat_str = "2000,2010,2020,2030,2040,2045,2050,2060"
+        seen_magnets: set[str] = set()
+        variants: list[Variant] = []
+
+        # ── ID-based search (exact Newznab lookup — greatly reduces wrong-film results) ──
+        # Priority order:
+        #   1. IMDB ID + season  → t=tvsearch&imdbid=&season=  (TV series season)
+        #   2. IMDB ID, no season → t=movie&imdbid=             (movie)
+        #   3. TMDB ID, no season → t=movie&tmdbid=             (movie, IMDB not available)
+        imdb_norm = (imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}") if imdb_id else None
+
+        if imdb_norm:
+            if season:
+                # TV-series exact search: tvsearch + imdbid + season [+ episode]
+                id_params: dict[str, str] = {
+                    "apikey": JACKETT_API_KEY,
+                    "t": "tvsearch",
+                    "imdbid": imdb_norm,
+                    "season": str(season),
+                    "cat": cat_str,
+                }
+                if episode:
+                    id_params["ep"] = str(episode)
+                logger.info("[JackettProvider] tvsearch imdbid=%s season=%s episode=%s", imdb_norm, season, episode)
+            else:
+                # Movie exact search: movie + imdbid
+                id_params = {
+                    "apikey": JACKETT_API_KEY,
+                    "t": "movie",
+                    "imdbid": imdb_norm,
+                    "cat": cat_str,
+                }
+                logger.info("[JackettProvider] movie search imdbid=%s", imdb_norm)
+            await self._id_search(url, id_params, seen_magnets, variants, season=season,
+                                   title=title, original_title=original_title, year=year)
+            logger.info("[JackettProvider] ID(imdb) search found %d results for %s", len(variants), imdb_norm)
+            # When an exact IMDB ID was used, NEVER fall back to generic text search.
+            # However, always run Ukrainian-specific queries so that UA-dubbed packs
+            # (tagged [UA] / UKR) are surfaced — they are rarely returned by ID searches.
+            await self._search_ukrainian(url, title, original_title, year, season, seen_magnets, variants)
+            return variants
+
+        elif tmdb_id and not season:
+            # Fallback: TMDB-based movie search (when IMDB ID is not available)
+            tmdb_params: dict[str, str] = {
+                "apikey": JACKETT_API_KEY,
+                "t": "movie",
+                "tmdbid": tmdb_id,
+                "cat": cat_str,
+            }
+            logger.info("[JackettProvider] movie search tmdbid=%s", tmdb_id)
+            await self._id_search(url, tmdb_params, seen_magnets, variants, season=None,
+                                   title=title, original_title=original_title, year=year)
+            logger.info("[JackettProvider] ID(tmdb) search found %d results for tmdb:%s", len(variants), tmdb_id)
+            # Same: exact TMDB ID — never fall back to generic text search.
+            # But always run Ukrainian-specific queries.
+            await self._search_ukrainian(url, title, original_title, year, season, seen_magnets, variants)
+            return variants
+
+        # ── Fallback: title-based text search (only when no ID was provided) ─
+        queries = self._build_queries(title, year, original_title, season, episode)
+        for query in queries:
+            params: dict[str, str] = {
+                "apikey": JACKETT_API_KEY,
+                "t": "search",
+                "q": query,
+                "cat": cat_str,
+            }
+            logger.info("[JackettProvider] GET %s query=%s", url, query)
+
+            try:
+                client = _get_http_client()
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                logger.warning("[JackettProvider] request error query=%s: %s", query, exc)
+                continue
+
+            results = data.get("Results") or []
+
+            count_before = len(variants)
+            for r in results:
+                title_r = r.get("Title", "")
+
+                # ── 1. Magnet only — reject HTTP download links ──────────────
+                magnet = r.get("MagnetUri") or ""
+                if not magnet.startswith("magnet:?xt=urn:btih"):
+                    logger.debug(
+                        "[JackettProvider] skip '%s': no valid magnet URI (got: %s)",
+                        title_r, magnet[:60] if magnet else "<empty>",
+                    )
+                    continue
+
+                # ── 2. Year soft-filter (±1 year, skip if no year in title) ──
+                if not _year_ok(title_r, year):
+                    logger.debug(
+                        "[JackettProvider] skip '%s': year mismatch (want %s)",
+                        title_r, year,
+                    )
+                    continue
+
+                # ── 3. Season filter ──────────────────────────────────────────
+                if not self._season_ok(title_r, season):
+                    logger.debug(
+                        "[JackettProvider] skip '%s': season mismatch (want S%02d)",
+                        title_r, season,
+                    )
+                    continue
+
+                # ── 4. Title similarity — check both title and original_title ─
+                matched = _title_matches(title, title_r)
+                if not matched and original_title:
+                    matched = _title_matches(original_title, title_r)
+                if not matched:
+                    logger.debug(
+                        "[JackettProvider] skip '%s': title mismatch for '%s'",
+                        title_r, title,
+                    )
+                    continue
+
+                # ── 5. Deduplication ─────────────────────────────────────────
+                if magnet in seen_magnets:
+                    continue
+                seen_magnets.add(magnet)
+
+                seeders = int(r.get("Seeders", 0) or 0)
+                size_bytes = int(r.get("Size", 0) or 0)
+                size_mb = size_bytes // (1024 * 1024) if size_bytes else 0
+                quality = _guess_quality(title_r)
+                codec = _guess_codec(title_r)
+                voice = _guess_voice(title_r)
+
+                # Extract year from the torrent title for the label (if known)
+                year_in_title = _YEAR_RE.search(title_r)
+                year_str = year_in_title.group(0) if year_in_title else (str(year) if year else "")
+
+                # Build human-readable label: voice + quality (no "Jackett" prefix to avoid
+                # the UI showing every card with the same "Jackett" banner)
+                if voice:
+                    label = f"{voice} • {quality.upper()}"
+                else:
+                    # Fall back to a trimmed torrent title so each card looks unique
+                    label = title_r[:MAX_LABEL_LEN].rstrip(" .-")
+
+                vid = hashlib.sha1(
+                    f"jackett:{title_r}:{quality}:{seeders}".encode()
+                ).hexdigest()[:12]
+
+                variants.append(
+                    Variant(
+                        id=vid,
+                        label=label,
+                        language=_detect_language(title_r),
+                        voice=voice,
+                        quality=quality,
+                        size_mb=size_mb,
+                        seeders=seeders,
+                        codec=codec,
+                        magnet=magnet,
+                    )
+                )
+
+            logger.info(
+                "[JackettProvider] query=%s found %d new results", query, len(variants) - count_before
+            )
+
+            # Stop early once we have enough results to avoid unnecessary requests
+            if len(variants) >= MAX_VARIANTS:
+                break
+
+        logger.info(
+            "[JackettProvider] total %d results for title='%s' original_title='%s' season=%s",
+            len(variants), title, original_title or "", season,
+        )
+        return variants

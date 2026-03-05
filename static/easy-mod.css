@@ -1,0 +1,144 @@
+/* Easy-Mod plugin styles */
+
+/* Button on film detail page */
+.easy-mod-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    cursor: pointer;
+}
+.easy-mod-btn svg {
+    flex-shrink: 0;
+}
+
+/* Modss-style spinner inside the button while variants load */
+.view--easy_mod .easy-mod-btn-spinner {
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 0.3em;
+}
+.view--easy_mod span {
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* Button hover/focus — scale like modss */
+.view--easy_mod.focus {
+    transform: scale(1.03);
+    transition: transform 0.2s ease;
+}
+
+/* Page wrapper (variants + wait) */
+.easy-mod-page {
+    padding: 1.5em 2em;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6em;
+    min-height: 10em;
+}
+
+/* Variant list */
+.easy-mod-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+}
+
+.easy-mod-item {
+    padding: 0.6em 1em;
+    border-radius: 0.4em;
+    cursor: pointer;
+}
+
+.easy-mod-item__title {
+    font-size: 1.05em;
+    font-weight: 600;
+}
+
+.easy-mod-item__meta {
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+.easy-mod-item__seeders {
+    font-size: 0.75em;
+    color: #4caf50;
+}
+
+/* Wait screen */
+.easy-mod-wait__msg {
+    font-size: 1.1em;
+    margin-bottom: 0.3em;
+}
+
+.easy-mod-wait__progress {
+    font-size: 2em;
+    font-weight: 700;
+    margin-bottom: 0.6em;
+}
+
+.easy-mod-wait__error {
+    color: #f44336;
+    margin-bottom: 0.6em;
+}
+.easy-mod-wait__back {
+    display: inline-block;
+    padding: 0.4em 1em;
+    border-radius: 0.3em;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+
+.easy-mod-error__hint {
+    margin-top: 0.5em;
+    font-size: 0.85em;
+    opacity: 0.7;
+}
+
+/* -------------------------------------------------------
+   Filter bar (season / quality / voice)
+   Modss-style horizontal pill buttons
+------------------------------------------------------- */
+.em-filters {
+    padding: 0.5em 1em 0.8em;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+}
+
+.em-filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35em;
+}
+
+.em-filter-label {
+    font-size: 0.82em;
+    opacity: 0.55;
+    min-width: 4.5em;
+    flex-shrink: 0;
+    padding-right: 0.2em;
+}
+
+.em-filter-btn {
+    padding: 0.2em 0.75em;
+    border-radius: 2em;
+    font-size: 0.82em;
+    background: rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, transform 0.1s;
+    display: inline-block;
+}
+
+.em-filter-btn.active {
+    background: #e5531a;
+    color: #fff;
+}
+
+.em-filter-btn.focus {
+    background: rgba(255, 255, 255, 0.22);
+    transform: scale(1.04);
+    outline: none;
+}

@@ -1044,6 +1044,11 @@
                 for (var zi = 0; zi < files.length; zi++) {
                     var zf = files[zi];
                     if (!zf.url) { continue; }
+                    // === ZETFLIX v3 - M3U8 PROXY FIX ===
+                    // Log when Zetflix proxy m3u8 URL is used (helps debugging CORS/CDN issues)
+                    if (zf.url.indexOf('/proxy/m3u8') !== -1) {
+                        log('[Easy-Mod] Using proxy for m3u8: ' + zf.url);
+                    }
                     // Use URL slice as unique suffix to avoid ID collisions on same-quality entries
                     var ztId = 'zetflix_' + (zf.quality || 'unknown') + '_' + zf.url.slice(-12).replace(/[^a-z0-9]/gi, '_');
                     zetflixData.push({

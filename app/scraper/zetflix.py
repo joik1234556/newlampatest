@@ -1,16 +1,15 @@
 """
 # === ZETFLIX SOURCE ===
+# === ZETFLIX v3 - M3U8 PROXY FIX ===
 Zetflix scraper — search and detail parsing.
 
 Zetflix embeds its video via third-party players (Kodik, Alloha, Moonwalk, etc.).
 The scraper:
   1. Searches for a title on each mirror in parallel.
   2. On the detail page extracts the embedded iframe src (player URL).
-  3. Returns those player URLs as "files" so the OnlineProviderBase can build
-     Variant objects with instant-play links.
-
-Player iframe URLs are suitable for direct Lampa playback (most are m3u8/mp4 or
-accepted by Lampa's built-in iframe player).
+  3. Follows the iframe URL to extract the real m3u8 from the player JS
+     (e.g. ``Playerjs({file:"https://...m3u8"})``, Kodik, Alloha patterns).
+  4. Returns wrapped /proxy/m3u8?url=... links so Lampa gets CORS headers.
 """
 from __future__ import annotations
 
@@ -49,12 +48,78 @@ def _wrap_m3u8_url(url: str) -> str:
     return wrapped
 
 
+# === ZETFLIX v3 - M3U8 PROXY FIX ===
+# Patterns that appear in Kodik / Alloha / Playerjs / generic player init blocks:
+#   new Playerjs({file:"https://cdn.../master.m3u8"})
+#   player.setup({sources: [{file: "https://...m3u8"}]})
+#   var file = "https://cdn.../playlist.m3u8"
+#   hls.loadSource("https://cdn.../index.m3u8")
+_IFRAME_M3U8_RE = re.compile(
+    r'(?:'
+    r'["\']?(?:file|url|src|stream|source)["\']?\s*[=:]\s*["\']'
+    r'|new\s+Hls\s*\(\s*\)\s*;\s*hls\.loadSource\s*\(\s*["\']'
+    r'|hls\.loadSource\s*\(\s*["\']'
+    r')'
+    r'(https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*)',
+    re.IGNORECASE,
+)
+# Broader fallback regex: any quoted https URL containing .m3u8
+_BROAD_M3U8_RE = re.compile(r"""["'](https?://[^"'<>\s]+\.m3u8[^"'<>\s]*)["']""")
+
+
+def _extract_m3u8_from_player_html(html: str) -> list[str]:
+    """
+    # === ZETFLIX v3 - M3U8 PROXY FIX ===
+    Scan the HTML / JS of a player iframe page and extract all m3u8 URLs.
+    Handles Kodik, Alloha, Playerjs and generic HLS player patterns.
+    Returns a deduplicated list of absolute m3u8 URLs found.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _IFRAME_M3U8_RE.finditer(html):
+        url = m.group(1)
+        if url and url not in seen:
+            seen.add(url)
+            found.append(url)
+    # Broader fallback: any quoted https URL containing .m3u8
+    for m in _BROAD_M3U8_RE.finditer(html):
+        url = m.group(1)
+        if url and url not in seen:
+            seen.add(url)
+            found.append(url)
+    logger.debug("[ZETFLIX DEBUG] _extract_m3u8_from_player_html found=%d", len(found))
+    return found
+
+
+async def _follow_iframe_for_m3u8(iframe_url: str) -> list[str]:
+    """
+    # === ZETFLIX v3 - M3U8 PROXY FIX ===
+    Follow a player iframe URL, parse its HTML/JS, and return any m3u8 URLs found.
+    Returns an empty list on any error (non-fatal — we fall back to the iframe URL).
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        html = await loop.run_in_executor(None, cloudscraper_get, iframe_url)
+    except Exception as exc:
+        logger.debug("[ZETFLIX DEBUG] Could not fetch iframe url=%s: %s", iframe_url, exc)
+        return []
+
+    urls = _extract_m3u8_from_player_html(html)
+    for u in urls:
+        logger.info("[ZETFLIX DEBUG] Found m3u8 in iframe url=%s m3u8=%s", iframe_url, u)
+    return urls
+
+
 def _guess_quality(text: str) -> str:
     text_lower = text.lower()
     for q in ("2160p", "4k", "1080p", "720p", "480p", "360p"):
         if q in text_lower:
             return "2160p" if q == "4k" else q
     return "1080p"
+
+
+# Maximum number of player iframes to follow when looking for m3u8 URLs
+_MAX_IFRAME_FOLLOW_COUNT: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +256,19 @@ _PLAYER_EMBED_RE = re.compile(
 # Detail / player extraction
 # ---------------------------------------------------------------------------
 
-def _extract_player_iframes(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
+def _extract_player_iframes(
+    soup: BeautifulSoup, base_url: str
+) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Extract embedded player URLs from the detail page.
-    Returns list of dicts with keys: quality, url.
+    Returns a tuple of (files, iframe_urls) where:
+      - files: list of dicts with keys ``quality`` and ``url``
+      - iframe_urls: list of player iframe URLs to follow for m3u8 extraction
     """
     files: list[dict] = []
     seen: set[str] = set()
+    # Track iframe URLs found for async follow-up in get_detail
+    iframe_urls: list[str] = []
 
     def _add(src: str, quality: str = "1080p") -> None:
         if not src or src in seen:
@@ -220,6 +291,10 @@ def _extract_player_iframes(soup: BeautifulSoup, base_url: str) -> list[dict[str
             continue
         quality = _guess_quality(iframe.get("class", "") + " " + iframe.get("data-quality", ""))
         _add(src, quality)
+        # === ZETFLIX v3 - M3U8 PROXY FIX ===
+        # Remember iframe URL for follow-up: we'll try to extract the real m3u8 from it
+        if src not in iframe_urls:
+            iframe_urls.append(src)
 
     # 2. data-src (lazy-loaded iframes)
     for iframe in soup.select("iframe[data-src]"):
@@ -229,6 +304,8 @@ def _extract_player_iframes(soup: BeautifulSoup, base_url: str) -> list[dict[str
         if not src.startswith("http"):
             src = urljoin(base_url, src)
         _add(src)
+        if src not in iframe_urls:
+            iframe_urls.append(src)
 
     # 3. <source> tags (direct video files)
     for source in soup.select("source[src]"):
@@ -255,7 +332,7 @@ def _extract_player_iframes(soup: BeautifulSoup, base_url: str) -> list[dict[str
         for m in _PLAYER_EMBED_RE.finditer(text):
             _add(m.group(1))
 
-    return files
+    return files, iframe_urls
 
 
 async def get_detail(url: str) -> dict:
@@ -276,7 +353,33 @@ async def get_detail(url: str) -> dict:
         if poster and not poster.startswith("http"):
             poster = urljoin(base_url, poster)
 
-    files = _extract_player_iframes(soup, base_url)
+    files, iframe_urls = _extract_player_iframes(soup, base_url)
+
+    # === ZETFLIX v3 - M3U8 PROXY FIX ===
+    # If no direct m3u8 found on the detail page, follow each iframe URL and
+    # try to extract the real m3u8 from the player page (Kodik/Alloha/Playerjs).
+    direct_m3u8_found = any(
+        ".m3u8" in (f.get("url") or "").lower() for f in files
+    )
+    if not direct_m3u8_found and iframe_urls:
+        logger.info(
+            "[ZETFLIX DEBUG] No direct m3u8 on detail page, following %d iframe(s)",
+            len(iframe_urls),
+        )
+        seen_m3u8: set[str] = set()
+        tasks = [_follow_iframe_for_m3u8(iu) for iu in iframe_urls[:_MAX_IFRAME_FOLLOW_COUNT]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for m3u8_list in results:
+            if isinstance(m3u8_list, Exception):
+                continue
+            for m3u8_url in m3u8_list:
+                if m3u8_url in seen_m3u8:
+                    continue
+                seen_m3u8.add(m3u8_url)
+                quality = _guess_quality(m3u8_url)
+                wrapped = _wrap_m3u8_url(m3u8_url)
+                logger.info("[ZETFLIX DEBUG] Wrapped: %s", wrapped)
+                files.append({"quality": quality, "url": wrapped})
 
     return {
         "title": title,

@@ -8,6 +8,18 @@
     var API_DEFAULT = 'http://46.225.222.255:8000';
     var API = API_DEFAULT; // kept for backward compat; use getApi() for all requests
 
+    // -------------------------------------------------------
+    // CDN proxy — all CDN source requests are routed through this
+    // Cloudflare Worker which auto-injects the correct Origin/Referer/
+    // User-Agent / Cookie headers for each CDN domain.
+    // -------------------------------------------------------
+    var LAMPA_PROXY = 'https://lampaproxy.egorkorotkov5.workers.dev/';
+
+    // Kodik token cache (in-memory + Lampa.Storage with 24-hour TTL)
+    var _kodikToken     = '';
+    var _kodikTokenTime = 0;
+    var _KODIK_TTL      = 24 * 60 * 60 * 1000; // 24 hours
+
     function getApi() {
         try {
             var stored = Lampa.Storage && Lampa.Storage.field && Lampa.Storage.field('easy_mod_api');
@@ -516,9 +528,11 @@
     // Shows only sources that have at least one variant.
     // Returns null when there is only one source (no tabs needed).
     // -------------------------------------------------------
-    var _ONLINE_SOURCE_KEYS = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1, zetflix: 1 };  // === ZETFLIX SOURCE ===
+    var _ONLINE_SOURCE_KEYS = { rezka: 1, kinogo: 1, videocdn: 1, kodik: 1, zetflix: 1, bazon: 1, lumex: 1, cdnmovies: 1, kinoplay: 1 };  // === CDN SOURCES ===
     var _SOURCE_KEY_TORRENT = 'torrent';
-    var _SOURCE_LABELS = { rezka: 'HDRezka', kinogo: 'Kinogo', videocdn: 'VideoCDN', kodik: 'Kodik', zetflix: 'Zetflix', torrent: 'Easy-Mod' };  // === ZETFLIX SOURCE ===
+    var _SOURCE_LABELS = { rezka: 'HDRezka', kinogo: 'Kinogo', videocdn: 'VideoCDN', kodik: 'Kodik', zetflix: 'Zetflix', torrent: 'Easy-Mod', bazon: 'Bazon', lumex: 'Lumex', cdnmovies: 'CDNMovies', kinoplay: 'KinoPlay' };  // === CDN SOURCES ===
+    var _CDN_SOURCE_KEYS = ['kodik', 'videocdn', 'bazon', 'lumex', 'cdnmovies', 'kinoplay'];
+    var _CDN_MAX_RESULTS = 5;  // max results to show per CDN source
     var _LABEL_ALL         = '\u0412\u0441\u0435';          // "Все"
     var _HEADER_ONLINE     = '\uD83C\uDF10 \u041e\u043d\u043b\u0430\u0439\u043d \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438';
     var _HEADER_EASYMOD    = '\u26A1 Easy-Mod';
@@ -565,10 +579,16 @@
     function buildSourceSelector(activeSource, onChange) {
         var wrap = jq('<div class="em-source-tabs">');
         var defs = [
-            { key: 'all',     label: '\u0412\u0441\u0435',  type: '' },
-            { key: 'torbox',  label: 'Easy-Mod',  type: 'torrent' },
-            { key: 'rezka',   label: 'HDRezka',   type: 'online' },
-            { key: 'zetflix', label: 'Zetflix',   type: 'online' },  // === ZETFLIX SOURCE ===
+            { key: 'all',       label: '\u0412\u0441\u0435',  type: '' },
+            { key: 'torbox',    label: 'Easy-Mod',   type: 'torrent' },
+            { key: 'rezka',     label: 'HDRezka',    type: 'online' },
+            { key: 'zetflix',   label: 'Zetflix',    type: 'online' },  // === ZETFLIX SOURCE ===
+            { key: 'kodik',     label: 'Kodik',      type: 'online' },  // === CDN SOURCES ===
+            { key: 'videocdn',  label: 'VideoCDN',   type: 'online' },
+            { key: 'bazon',     label: 'Bazon',      type: 'online' },
+            { key: 'lumex',     label: 'Lumex',      type: 'online' },
+            { key: 'cdnmovies', label: 'CDNMovies',  type: 'online' },
+            { key: 'kinoplay',  label: 'KinoPlay',   type: 'online' },
         ];
         for (var i = 0; i < defs.length; i++) {
             (function (d) {
@@ -587,8 +607,256 @@
     }
 
     // -------------------------------------------------------
-    // Loading state HTML (modss-style spinner)
+    // CDN Sources — Kodik, VideoCDN, Bazon, Lumex, CDNMovies, KinoPlay
+    // All requests routed through LAMPA_PROXY which auto-injects CDN headers.
     // -------------------------------------------------------
+
+    function _cdnEnabled(name) {
+        try {
+            var v = Lampa.Storage.field('easymod_' + name + '_enabled');
+            // field() returns undefined if not yet set → treat as enabled
+            return v === undefined || v === null || v === '' ? true : v !== false;
+        } catch (e) { return true; }
+    }
+
+    // Kodik token: fetched from kodik.info and cached for 24 h
+    function _getKodikToken(callback) {
+        var now = Date.now();
+        if (_kodikToken && (now - _kodikTokenTime) < _KODIK_TTL) { callback(_kodikToken); return; }
+        try {
+            var stored = Lampa.Storage.get('easymod_kodik_token', '');
+            var storedTime = parseInt(Lampa.Storage.get('easymod_kodik_token_time', '0') || '0', 10);
+            if (stored && (now - storedTime) < _KODIK_TTL) {
+                _kodikToken = stored; _kodikTokenTime = storedTime;
+                callback(_kodikToken); return;
+            }
+        } catch (e) {}
+        // Fetch token from kodik.info HTML page
+        if (typeof fetch !== 'undefined') {
+            fetch(LAMPA_PROXY + 'https://kodik.info/', { mode: 'cors' })
+                .then(function (r) { return r.text(); })
+                .then(function (html) {
+                    if (typeof html !== 'string') { callback(''); return; }
+                    // Try multiple patterns: JSON-style "token":"VALUE" or URL-style token=VALUE
+                    var m = html.match(/"token"\s*:\s*"([a-zA-Z0-9]{8,})"/);
+                    if (!m) m = html.match(/['"]token['"]\s*[:=]\s*['"]([a-zA-Z0-9]{8,})['"]/);
+                    if (!m) m = html.match(/[?&]token=([a-zA-Z0-9]{8,})/);
+                    var token = m ? (m[1] || '') : '';
+                    if (token) {
+                        _kodikToken = token; _kodikTokenTime = Date.now();
+                        try {
+                            Lampa.Storage.set('easymod_kodik_token', token);
+                            Lampa.Storage.set('easymod_kodik_token_time', String(_kodikTokenTime));
+                        } catch (e) {}
+                        log('[Kodik] token obtained from kodik.info');
+                    } else {
+                        log('[Kodik] token not found in kodik.info page, using anon');
+                    }
+                    callback(token);
+                })
+                .catch(function (e) { log('[Kodik] failed to fetch kodik.info:', String(e)); callback(''); });
+        } else { callback(''); }
+    }
+
+    function _fetchCdnKodik(params, callback) {
+        if (!_cdnEnabled('kodik')) { callback([]); return; }
+        _getKodikToken(function (token) {
+            var url = LAMPA_PROXY + 'https://kodikapi.com/search'
+                + '?with_material_data=true'
+                + '&types=film,foreign-film,cartoon,anime,documentary-film,tv-series,foreign-serial,cartoon-serial,anime-serial'
+                + '&token=' + encodeURIComponent(token || 'anon')
+                + '&title=' + encodeURIComponent(params.title || '');
+            if (params.imdb_id)  url += '&imdb_id='        + encodeURIComponent(params.imdb_id);
+            netGet(url, function (json) {
+                var results = (json && json.results) ? json.results : [];
+                var variants = [], seen = {};
+                for (var i = 0; i < results.length; i++) {
+                    var r = results[i];
+                    if (!r.link) continue;
+                    var tr  = (r.translation && r.translation.title) || 'RU';
+                    var q   = r.quality || '720p';
+                    var key = tr + '_' + q;
+                    if (seen[key]) continue; seen[key] = true;
+                    var embedUrl = r.link.indexOf('//') === 0 ? 'https:' + r.link : r.link;
+                    variants.push({
+                        id: 'kodik_' + String(r.id || i) + '_' + key.replace(/[^a-z0-9]/gi, '_'),
+                        label: 'Kodik \u2022 ' + tr + ' \u2022 ' + q.toUpperCase() + ' (Online)',
+                        quality: q, url: LAMPA_PROXY + embedUrl,
+                        source: 'kodik', language: 'ru', voice: tr,
+                        is_cached: true, seeders: 0, size_mb: 0, codec: '', magnet: ''
+                    });
+                }
+                callback(variants);
+            }, function (e) { console.warn('[EasyMod][Kodik] error:', e); callback([]); });
+        });
+    }
+
+    function _fetchCdnVideoCDN(params, callback) {
+        if (!_cdnEnabled('videocdn')) { callback([]); return; }
+        // Public anonymous token for VideoCDN
+        var VCDN_TOKEN = '4X6dDMmAh3M7q2jcI4rS7hHzRPWxzCqN';
+        var url = LAMPA_PROXY + 'https://videocdn.tv/api/short'
+            + '?api_token=' + VCDN_TOKEN
+            + '&title=' + encodeURIComponent(params.title || '');
+        if (params.imdb_id) url += '&imdb_id=' + encodeURIComponent(params.imdb_id);
+        netGet(url, function (json) {
+            var data = (json && json.data) ? json.data : [];
+            if (!Array.isArray(data)) data = [];
+            var variants = [];
+            for (var i = 0; i < data.length && i < _CDN_MAX_RESULTS; i++) {
+                var d = data[i];
+                var iframeUrl = d.iframe_url || d.link || '';
+                if (!iframeUrl) continue;
+                var q  = d.quality || d.max_quality || 'HD';
+                var tr = 'RU';
+                variants.push({
+                    id: 'videocdn_' + String(d.id || i),
+                    label: 'VideoCDN \u2022 ' + tr + ' \u2022 ' + String(q).toUpperCase() + ' (Online)',
+                    quality: q, url: LAMPA_PROXY + iframeUrl,
+                    source: 'videocdn', language: 'ru', voice: tr,
+                    is_cached: true, seeders: 0, size_mb: 0, codec: '', magnet: ''
+                });
+            }
+            callback(variants);
+        }, function (e) { console.warn('[EasyMod][VideoCDN] error:', e); callback([]); });
+    }
+
+    function _fetchCdnBazon(params, callback) {
+        if (!_cdnEnabled('bazon')) { callback([]); return; }
+        var url = LAMPA_PROXY + 'https://bazon.cc/api/search'
+            + '?title=' + encodeURIComponent(params.title || '');
+        if (params.imdb_id) url += '&imdb_id=' + encodeURIComponent(params.imdb_id);
+        netGet(url, function (json) {
+            var results = (json && (json.results || json.data || json.movies)) || [];
+            if (!Array.isArray(results)) results = (json && typeof json === 'object') ? [json] : [];
+            var variants = [];
+            for (var i = 0; i < results.length && i < _CDN_MAX_RESULTS; i++) {
+                var r = results[i];
+                var iframeUrl = r.iframe || r.link || r.url || '';
+                if (!iframeUrl) continue;
+                var q  = r.quality || 'HD';
+                var tr = r.translation || r.voice || 'RU';
+                variants.push({
+                    id: 'bazon_' + String(r.id || i),
+                    label: 'Bazon \u2022 ' + tr + ' \u2022 ' + String(q).toUpperCase() + ' (Online)',
+                    quality: q, url: LAMPA_PROXY + iframeUrl,
+                    source: 'bazon', language: 'ru', voice: tr,
+                    is_cached: true, seeders: 0, size_mb: 0, codec: '', magnet: ''
+                });
+            }
+            callback(variants);
+        }, function (e) { console.warn('[EasyMod][Bazon] error:', e); callback([]); });
+    }
+
+    function _fetchCdnLumex(params, callback) {
+        if (!_cdnEnabled('lumex')) { callback([]); return; }
+        var url = LAMPA_PROXY + 'https://api.lumex.pw/'
+            + '?title=' + encodeURIComponent(params.title || '');
+        if (params.imdb_id) url += '&imdb_id=' + encodeURIComponent(params.imdb_id);
+        netGet(url, function (json) {
+            var results = (json && (json.results || json.data || json.movies || json.content)) || [];
+            if (!Array.isArray(results)) results = (json && typeof json === 'object') ? [json] : [];
+            var variants = [];
+            for (var i = 0; i < results.length && i < _CDN_MAX_RESULTS; i++) {
+                var r = results[i];
+                var iframeUrl = r.iframe || r.link || r.url || r.player || '';
+                if (!iframeUrl) continue;
+                var q  = r.quality || 'HD';
+                var tr = r.translation || r.voice || 'RU';
+                variants.push({
+                    id: 'lumex_' + String(r.id || i),
+                    label: 'Lumex \u2022 ' + tr + ' \u2022 ' + String(q).toUpperCase() + ' (Online)',
+                    quality: q, url: LAMPA_PROXY + iframeUrl,
+                    source: 'lumex', language: 'ru', voice: tr,
+                    is_cached: true, seeders: 0, size_mb: 0, codec: '', magnet: ''
+                });
+            }
+            callback(variants);
+        }, function (e) { console.warn('[EasyMod][Lumex] error:', e); callback([]); });
+    }
+
+    function _fetchCdnCdnMovies(params, callback) {
+        if (!_cdnEnabled('cdnmovies')) { callback([]); return; }
+        var url = LAMPA_PROXY + 'https://cdnmovies.net/'
+            + '?title=' + encodeURIComponent(params.title || '');
+        if (params.imdb_id) url += '&imdb_id=' + encodeURIComponent(params.imdb_id);
+        netGet(url, function (json) {
+            var results = (json && (json.results || json.data || json.movies)) || [];
+            if (!Array.isArray(results)) results = (json && typeof json === 'object') ? [json] : [];
+            var variants = [];
+            for (var i = 0; i < results.length && i < _CDN_MAX_RESULTS; i++) {
+                var r = results[i];
+                var iframeUrl = r.iframe || r.link || r.url || '';
+                if (!iframeUrl) continue;
+                var q  = r.quality || 'HD';
+                var tr = r.translation || r.voice || 'RU';
+                variants.push({
+                    id: 'cdnmovies_' + String(r.id || i),
+                    label: 'CDNMovies \u2022 ' + tr + ' \u2022 ' + String(q).toUpperCase() + ' (Online)',
+                    quality: q, url: LAMPA_PROXY + iframeUrl,
+                    source: 'cdnmovies', language: 'ru', voice: tr,
+                    is_cached: true, seeders: 0, size_mb: 0, codec: '', magnet: ''
+                });
+            }
+            callback(variants);
+        }, function (e) { console.warn('[EasyMod][CDNMovies] error:', e); callback([]); });
+    }
+
+    function _fetchCdnKinoPlay(params, callback) {
+        if (!_cdnEnabled('kinoplay')) { callback([]); return; }
+        var url = LAMPA_PROXY + 'https://kinoplay.site/api/search'
+            + '?token=&query=' + encodeURIComponent(params.title || '');
+        netGet(url, function (json) {
+            var results = (json && (json.results || json.data || json.movies)) || [];
+            if (!Array.isArray(results)) results = (json && typeof json === 'object') ? [json] : [];
+            var variants = [];
+            for (var i = 0; i < results.length && i < _CDN_MAX_RESULTS; i++) {
+                var r = results[i];
+                var iframeUrl = r.iframe || r.link || r.url || r.player || '';
+                if (!iframeUrl) continue;
+                var q  = r.quality || 'HD';
+                var tr = r.translation || r.voice || 'RU';
+                variants.push({
+                    id: 'kinoplay_' + String(r.id || i),
+                    label: 'KinoPlay \u2022 ' + tr + ' \u2022 ' + String(q).toUpperCase() + ' (Online)',
+                    quality: q, url: LAMPA_PROXY + iframeUrl,
+                    source: 'kinoplay', language: 'ru', voice: tr,
+                    is_cached: true, seeders: 0, size_mb: 0, codec: '', magnet: ''
+                });
+            }
+            callback(variants);
+        }, function (e) { console.warn('[EasyMod][KinoPlay] error:', e); callback([]); });
+    }
+
+    // Run all enabled CDN sources in parallel.
+    // If specificSource is set (e.g. 'kodik'), only that fetcher is called.
+    function _fetchAllCdn(params, specificSource, callback) {
+        var allFetchers = {
+            kodik:     _fetchCdnKodik,
+            videocdn:  _fetchCdnVideoCDN,
+            bazon:     _fetchCdnBazon,
+            lumex:     _fetchCdnLumex,
+            cdnmovies: _fetchCdnCdnMovies,
+            kinoplay:  _fetchCdnKinoPlay
+        };
+        var fetchers;
+        if (specificSource && allFetchers[specificSource]) {
+            fetchers = [allFetchers[specificSource]];
+        } else {
+            fetchers = [];
+            for (var k in allFetchers) { if (Object.prototype.hasOwnProperty.call(allFetchers, k)) { fetchers.push(allFetchers[k]); } }
+        }
+        var pending = fetchers.length;
+        if (!pending) { callback([]); return; }
+        var allData = [];
+        function done(data) {
+            allData = allData.concat(data || []);
+            if (--pending <= 0) { callback(allData); }
+        }
+        for (var i = 0; i < fetchers.length; i++) { fetchers[i](params, done); }
+    }
+
+
     function loadingHtml(subtitle) {
         return '<div class="online-empty" style="text-align:center;padding:3em 2em">' +
             '<div class="online-empty__title">Easy-Mod</div>' +
@@ -832,17 +1100,17 @@
         self._scroll = null;
         self._render.empty();
 
-        // 1. Source selector [Все | TorBox | HDRezka] — always visible, even during loading
+        // 1. Source selector [Все | TorBox | HDRezka | CDN...] — always visible, even during loading
         var srcSel = buildSourceSelector(self._activeSource, function (key) {
             self._activeSource  = key;
             // Map selector key to result source filter:
             //   'torbox' → show only torrent variants
             //   'rezka'  → show only rezka online variants
+            //   'zetflix'/'kodik'/etc. → show that source only
             //   'all'    → show all
             self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT
-                             : (key === 'rezka')   ? 'rezka'
-                             : (key === 'zetflix') ? 'zetflix'     // === ZETFLIX SOURCE ===
-                             : '';
+                             : (key === 'all')    ? ''
+                             : key;  // maps to _ONLINE_SOURCE_KEYS (online sources) or passed through as-is
             self._allVariants   = [];
             self._filterVoice   = '';
             self._filterQuality = '';
@@ -901,18 +1169,21 @@
         var wantTorbox  = (self._activeSource === 'all' || self._activeSource === 'torbox');
         var wantRezka   = (self._activeSource === 'all' || self._activeSource === 'rezka');
         var wantZetflix = (self._activeSource === 'all' || self._activeSource === 'zetflix');  // === ZETFLIX SOURCE ===
+        var wantCdn     = (self._activeSource === 'all' || _CDN_SOURCE_KEYS.indexOf(self._activeSource) !== -1);  // === CDN SOURCES ===
 
         var variantsDone  = !wantTorbox;   // skip if not needed
         var hdrezkaDone   = !wantRezka;    // skip if not needed
         var zetflixDone   = !wantZetflix;  // skip if not needed  // === ZETFLIX SOURCE ===
+        var cdnDone       = !wantCdn;      // skip if not needed  // === CDN SOURCES ===
         var variantsData  = [];
         var hdrezkaData   = [];
         var zetflixData   = [];  // === ZETFLIX SOURCE ===
+        var cdnData       = [];  // === CDN SOURCES ===
         var torboxFastPath = false;
         var variantsNetErr = false;  // true when the /variants request itself failed (network / 5xx)
 
         function _mergeAndRender() {
-            if (!variantsDone || !hdrezkaDone || !zetflixDone) { return; }  // === ZETFLIX SOURCE ===
+            if (!variantsDone || !hdrezkaDone || !zetflixDone || !cdnDone) { return; }  // === CDN SOURCES ===
             if (self._dead) { return; }
             // Discard stale responses: if the user switched season/episode while
             // this fetch was in-flight, a newer _fetchVariants has already started.
@@ -921,9 +1192,10 @@
                 return;
             }
             try {
-                var all = variantsData.concat(hdrezkaData).concat(zetflixData);  // === ZETFLIX SOURCE ===
+                var all = variantsData.concat(hdrezkaData).concat(zetflixData).concat(cdnData);  // === CDN SOURCES ===
                 log('merged variants N=' + all.length + ' (torrent=' + variantsData.length +
-                    ' hdrezka=' + hdrezkaData.length + ' zetflix=' + zetflixData.length + ')');
+                    ' hdrezka=' + hdrezkaData.length + ' zetflix=' + zetflixData.length +
+                    ' cdn=' + cdnData.length + ')');
                 self._allVariants  = all;
                 self._variantsNetErr = variantsNetErr;
                 self._filterVoice  = '';
@@ -1078,6 +1350,23 @@
             });
         }
         // === END ZETFLIX SOURCE ===
+
+        // === CDN SOURCES ===
+        if (wantCdn) {
+            var cdnParams = {};
+            if (title) { cdnParams.title = title; }
+            if (year)  { cdnParams.year  = year; }
+            if (imdb)  { cdnParams.imdb_id = imdb; }
+            var activeCdnSource = (_CDN_SOURCE_KEYS.indexOf(self._activeSource) !== -1) ? self._activeSource : null;
+            _fetchAllCdn(cdnParams, activeCdnSource, function (data) {
+                if (self._dead) { return; }
+                cdnDone = true;
+                cdnData = data || [];
+                log('cdn loaded N=' + cdnData.length);
+                _mergeAndRender();
+            });
+        }
+        // === END CDN SOURCES ===
     };
 
     EasyModVariants.prototype._renderVariants = function () {
@@ -1176,7 +1465,7 @@
         // 1. Source selector
         var srcSel2 = buildSourceSelector(self._activeSource, function (key) {
             self._activeSource  = key;
-            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'rezka') ? 'rezka' : '';
+            self._filterSource  = (key === 'torbox') ? _SOURCE_KEY_TORRENT : (key === 'all') ? '' : key;
             self._allVariants   = [];
             self._filterVoice   = '';
             self._filterQuality = '';
@@ -1969,6 +2258,34 @@
                 '<div class="settings-param" data-name="easy_mod_version" data-static="true">' +
                     '<div class="settings-param__name">\u0412\u0435\u0440\u0441\u0438\u044f Easy Mod</div>' +
                     '<div class="settings-param__value">' + VERSION + '</div>' +
+                '</div>' +
+                // CDN Sources toggle section
+                '<div class="settings-param" data-static="true" style="margin-top:.5em;opacity:.6;font-size:.9em">' +
+                    '<div class="settings-param__name">CDN \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438 (\u0447\u0435\u0440\u0435\u0437 \u043f\u0440\u043e\u043a\u0441\u0438)</div>' +
+                '</div>' +
+                '<div class="settings-param selector" data-name="easymod_kodik_enabled" data-type="trigger">' +
+                    '<div class="settings-param__name">Kodik</div>' +
+                    '<div class="settings-param__value"></div>' +
+                '</div>' +
+                '<div class="settings-param selector" data-name="easymod_videocdn_enabled" data-type="trigger">' +
+                    '<div class="settings-param__name">VideoCDN</div>' +
+                    '<div class="settings-param__value"></div>' +
+                '</div>' +
+                '<div class="settings-param selector" data-name="easymod_bazon_enabled" data-type="trigger">' +
+                    '<div class="settings-param__name">Bazon</div>' +
+                    '<div class="settings-param__value"></div>' +
+                '</div>' +
+                '<div class="settings-param selector" data-name="easymod_lumex_enabled" data-type="trigger">' +
+                    '<div class="settings-param__name">Lumex</div>' +
+                    '<div class="settings-param__value"></div>' +
+                '</div>' +
+                '<div class="settings-param selector" data-name="easymod_cdnmovies_enabled" data-type="trigger">' +
+                    '<div class="settings-param__name">CDNMovies</div>' +
+                    '<div class="settings-param__value"></div>' +
+                '</div>' +
+                '<div class="settings-param selector" data-name="easymod_kinoplay_enabled" data-type="trigger">' +
+                    '<div class="settings-param__name">KinoPlay</div>' +
+                    '<div class="settings-param__value"></div>' +
                 '</div>' +
                 '</div>';
             Lampa.Template.add('settings_easy_mod', template);

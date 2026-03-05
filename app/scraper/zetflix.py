@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlparse, urlencode
 from bs4 import BeautifulSoup
 
 from app.scraper import cloudscraper_get, try_mirrors
-from app.config import ZETFLIX_MIRRORS
+from app.config import ZETFLIX_MIRRORS, PROXY_M3U8_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _wrap_m3u8_url(url: str) -> str:
+    """
+    # === ZETFLIX PROXY ===
+    Wrap a raw m3u8 URL in the /proxy/m3u8 endpoint so Lampa gets CORS headers
+    and relative .ts links are rewritten to absolute CDN URLs.
+    Only wraps when PROXY_M3U8_ENABLED is True; returns the original URL otherwise.
+    """
+    if not PROXY_M3U8_ENABLED:
+        return url
+    if ".m3u8" not in url.lower():
+        return url
+    from urllib.parse import quote
+    wrapped = f"/proxy/m3u8?url={quote(url, safe='')}"
+    logger.info("[ZETFLIX PROXY] Wrapped m3u8 url: %s", wrapped)
+    return wrapped
+
 
 def _guess_quality(text: str) -> str:
     text_lower = text.lower()
@@ -186,7 +203,10 @@ def _extract_player_iframes(soup: BeautifulSoup, base_url: str) -> list[dict[str
         if not src or src in seen:
             return
         seen.add(src)
-        files.append({"quality": quality, "url": src})
+        # === ZETFLIX PROXY ===
+        # Wrap m3u8 playlists through the proxy to fix CORS; leave other URLs unchanged
+        proxied_src = _wrap_m3u8_url(src)
+        files.append({"quality": quality, "url": proxied_src})
 
     # 1. iframe[src] — most common player embedding method
     for iframe in soup.select("iframe[src]"):

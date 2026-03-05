@@ -43,6 +43,12 @@ KODIK_MIRRORS: list[str] = [
     "https://kodik.biz/",
 ]
 
+# === PROXY M3U8 - ONLY PLAYLIST ===
+# Enable the /proxy/m3u8 endpoint (proxies only m3u8 playlists, not .ts segments)
+PROXY_M3U8_ENABLED: bool = True
+# Future flag: set True to proxy full stream including .ts segments (high bandwidth!)
+PROXY_FULL_STREAM: bool = False
+
 # === ZETFLIX SOURCE ===
 ZETFLIX_MIRRORS: list[str] = [
     "https://4mar.zet-flix.online/",

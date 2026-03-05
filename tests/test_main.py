@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch, MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -329,3 +330,141 @@ class TestTorboxHelpers:
     def test_guess_quality_unknown(self):
         from app.torbox import _guess_quality
         assert _guess_quality("somefile.avi") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# /proxy/m3u8
+# ---------------------------------------------------------------------------
+
+class TestProxyM3u8:
+    def test_proxy_m3u8_success_rewrites_relative_links(self, client):
+        m3u8_body = (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:3\n"
+            "#EXT-X-TARGETDURATION:6\n"
+            "#EXTINF:6.0,\n"
+            "seg001.ts\n"
+            "#EXTINF:6.0,\n"
+            "seg002.ts\n"
+            "#EXT-X-ENDLIST\n"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = m3u8_body
+
+        async def mock_get(*args, **kwargs):
+            return mock_response
+
+        with patch("app.routers.proxy.httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.get = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            resp = client.get(
+                "/proxy/m3u8?url=https://cdn.example.com/hls/master.m3u8"
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/vnd.apple.mpegurl")
+        assert resp.headers.get("access-control-allow-origin") == "*"
+        body = resp.text
+        # Relative .ts links must be rewritten to absolute CDN URLs
+        assert "https://cdn.example.com/hls/seg001.ts" in body
+        assert "https://cdn.example.com/hls/seg002.ts" in body
+
+    def test_proxy_m3u8_rejects_ts_segments(self, client):
+        resp = client.get(
+            "/proxy/m3u8?url=https://cdn.example.com/hls/seg001.ts"
+        )
+        assert resp.status_code == 400
+
+    def test_proxy_m3u8_upstream_error_returns_502(self, client):
+        with patch("app.routers.proxy.httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.get = AsyncMock(side_effect=httpx.RequestError("connect failed", request=None))
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            resp = client.get(
+                "/proxy/m3u8?url=https://cdn.example.com/hls/master.m3u8"
+            )
+        assert resp.status_code == 502
+
+    def test_proxy_m3u8_upstream_404_propagates(self, client):
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.text = ""
+
+        with patch("app.routers.proxy.httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.get = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            resp = client.get(
+                "/proxy/m3u8?url=https://cdn.example.com/hls/missing.m3u8"
+            )
+        assert resp.status_code == 404
+
+    def test_proxy_m3u8_absolute_links_unchanged(self, client):
+        m3u8_body = (
+            "#EXTM3U\n"
+            "#EXTINF:6.0,\n"
+            "https://other-cdn.example.com/seg001.ts\n"
+            "#EXT-X-ENDLIST\n"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = m3u8_body
+
+        with patch("app.routers.proxy.httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.get = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            resp = client.get(
+                "/proxy/m3u8?url=https://cdn.example.com/hls/master.m3u8"
+            )
+
+        assert resp.status_code == 200
+        # Already-absolute links must pass through unchanged
+        assert "https://other-cdn.example.com/seg001.ts" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# _rewrite_m3u8 unit tests
+# ---------------------------------------------------------------------------
+
+class TestRewriteM3u8:
+    def test_relative_ts_becomes_absolute(self):
+        from app.routers.proxy import _rewrite_m3u8
+        content = "#EXTM3U\n#EXTINF:6.0,\nseg001.ts\n"
+        out, count = _rewrite_m3u8(content, "https://cdn.example.com/hls/")
+        assert "https://cdn.example.com/hls/seg001.ts" in out
+        assert count == 1
+
+    def test_absolute_links_not_counted(self):
+        from app.routers.proxy import _rewrite_m3u8
+        content = "#EXTM3U\n#EXTINF:6.0,\nhttps://cdn.example.com/seg001.ts\n"
+        out, count = _rewrite_m3u8(content, "https://cdn.example.com/hls/")
+        assert count == 0
+
+    def test_protocol_relative_rewritten(self):
+        from app.routers.proxy import _rewrite_m3u8
+        content = "#EXTM3U\n#EXTINF:6.0,\n//cdn.example.com/seg001.ts\n"
+        out, count = _rewrite_m3u8(content, "https://cdn.example.com/hls/")
+        assert "https://cdn.example.com/seg001.ts" in out
+        assert count == 1
+
+    def test_ext_tags_not_rewritten(self):
+        from app.routers.proxy import _rewrite_m3u8
+        content = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ENDLIST\n"
+        out, count = _rewrite_m3u8(content, "https://cdn.example.com/hls/")
+        assert count == 0
+        assert out == content

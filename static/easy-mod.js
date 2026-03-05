@@ -692,6 +692,7 @@
         this._seriesSeasons = [];
         this._episodeCounts = {};  // season_number → episode_count
         this._variantsNetErr = false; // true when the last /variants request failed at the network layer
+        this._fetchGen      = 0;    // incremented on each _fetchVariants call; used to discard stale responses
         // HDRezka translator selection
         this._rezkaTranslators  = [];   // [{id, name, premium}] — fetched from /hdrezka/info
         this._rezkaUrl          = '';   // resolved HDRezka page URL (reused across translator switches)
@@ -788,8 +789,11 @@
     };
 
     EasyModVariants.prototype._fetchVariants = function () {
-        var self  = this;
-        var m     = self._movie || {};
+        var self     = this;
+        // Increment generation counter so any in-flight response from a previous
+        // season/episode selection can detect it is stale and discard itself.
+        var fetchGen = ++self._fetchGen;
+        var m        = self._movie || {};
         var title = m.title || m.name || m.original_title || m.original_name || '';
         var year  = m.year  || (m.release_date ? m.release_date.slice(0, 4) : '')
                             || (m.first_air_date ? m.first_air_date.slice(0, 4) : '');
@@ -901,6 +905,12 @@
         function _mergeAndRender() {
             if (!variantsDone || !hdrezkaDone) { return; }
             if (self._dead) { return; }
+            // Discard stale responses: if the user switched season/episode while
+            // this fetch was in-flight, a newer _fetchVariants has already started.
+            if (fetchGen !== self._fetchGen) {
+                log('discarding stale fetch response (gen=' + fetchGen + ' current=' + self._fetchGen + ')');
+                return;
+            }
             try {
                 var all = variantsData.concat(hdrezkaData);
                 log('merged variants N=' + all.length + ' (torrent=' + variantsData.length +

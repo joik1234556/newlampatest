@@ -97,3 +97,12 @@ ENABLE_DEMO_PROVIDER: bool = os.getenv("ENABLE_DEMO_PROVIDER", "0") == "1"
 # Minimum number of TorBox-native cached results to treat as a sufficient
 # fast-path hit (skip Jackett/Torrentio for popular titles).
 TORBOX_SEARCH_MIN_RESULTS: int = int(os.getenv("TORBOX_SEARCH_MIN_RESULTS", "3"))
+
+# === SCRAPINGBEE CONFIG ===
+# API key — set SCRAPINGBEE_API_KEY in .env (never hardcode here)
+SCRAPINGBEE_API_KEY: str = os.getenv("SCRAPINGBEE_API_KEY", "")
+# Set USE_SCRAPINGBEE=0 to fall back to the legacy cloudscraper path for Zetflix
+USE_SCRAPINGBEE: bool = os.getenv("USE_SCRAPINGBEE", "1") == "1"
+SCRAPINGBEE_RENDER_JS: bool = os.getenv("SCRAPINGBEE_RENDER_JS", "1") == "1"
+SCRAPINGBEE_PREMIUM_PROXY: bool = os.getenv("SCRAPINGBEE_PREMIUM_PROXY", "1") == "1"
+SCRAPINGBEE_COUNTRY: str = os.getenv("SCRAPINGBEE_COUNTRY", "ru")  # важно для русских сайтов

@@ -1,6 +1,7 @@
 """
 # === ZETFLIX SOURCE ===
 # === ZETFLIX v3 - M3U8 PROXY FIX ===
+# === SCRAPINGBEE INTEGRATION ===
 Zetflix scraper — search and detail parsing.
 
 Zetflix embeds its video via third-party players (Kodik, Alloha, Moonwalk, etc.).
@@ -10,6 +11,10 @@ The scraper:
   3. Follows the iframe URL to extract the real m3u8 from the player JS
      (e.g. ``Playerjs({file:"https://...m3u8"})``, Kodik, Alloha patterns).
   4. Returns wrapped /proxy/m3u8?url=... links so Lampa gets CORS headers.
+
+When USE_SCRAPINGBEE=True (default), requests are routed through the ScrapingBee
+API to handle Cloudflare JS challenges and CORS automatically.  Set
+USE_SCRAPINGBEE=0 in .env to fall back to the legacy cloudscraper path.
 """
 from __future__ import annotations
 
@@ -19,12 +24,58 @@ import re
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlencode
 
+import httpx
 from bs4 import BeautifulSoup
 
 from app.scraper import cloudscraper_get, try_mirrors
-from app.config import ZETFLIX_MIRRORS, PROXY_M3U8_ENABLED
+from app.config import (
+    ZETFLIX_MIRRORS,
+    PROXY_M3U8_ENABLED,
+    # === SCRAPINGBEE INTEGRATION ===
+    SCRAPINGBEE_API_KEY,
+    USE_SCRAPINGBEE,
+    SCRAPINGBEE_RENDER_JS,
+    SCRAPINGBEE_PREMIUM_PROXY,
+    SCRAPINGBEE_COUNTRY,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# === SCRAPINGBEE INTEGRATION === HTTP helper
+# ---------------------------------------------------------------------------
+
+_SCRAPINGBEE_ENDPOINT = "https://app.scrapingbee.com/api/v1/"
+
+
+def _scrapingbee_get(url: str) -> str:
+    """
+    # === SCRAPINGBEE INTEGRATION ===
+    Fetch *url* via the ScrapingBee API.
+
+    ScrapingBee handles JS rendering and premium proxies, which solves both
+    Cloudflare challenges and CORS issues that the Zetflix mirrors present.
+
+    Falls back to ``cloudscraper_get`` if USE_SCRAPINGBEE is False or
+    SCRAPINGBEE_API_KEY is not set.
+    """
+    if not USE_SCRAPINGBEE or not SCRAPINGBEE_API_KEY:
+        logger.debug("[SCRAPINGBEE] Fallback to cloudscraper for url=%s", url)
+        return cloudscraper_get(url)
+
+    params: dict[str, str] = {
+        "api_key": SCRAPINGBEE_API_KEY,
+        "url": url,
+        "render_js": "true" if SCRAPINGBEE_RENDER_JS else "false",
+        "premium_proxy": "true" if SCRAPINGBEE_PREMIUM_PROXY else "false",
+        "country_code": SCRAPINGBEE_COUNTRY,
+    }
+    logger.info("[SCRAPINGBEE] Request sent to: %s", url)
+    resp = httpx.get(_SCRAPINGBEE_ENDPOINT, params=params, timeout=60)
+    logger.info("[SCRAPINGBEE] Response status: %s", resp.status_code)
+    resp.raise_for_status()
+    return resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -96,10 +147,14 @@ async def _follow_iframe_for_m3u8(iframe_url: str) -> list[str]:
     # === ZETFLIX v3 - M3U8 PROXY FIX ===
     Follow a player iframe URL, parse its HTML/JS, and return any m3u8 URLs found.
     Returns an empty list on any error (non-fatal — we fall back to the iframe URL).
+
+    Uses ScrapingBee when USE_SCRAPINGBEE=True so JS-rendered player pages are
+    correctly parsed (Kodik, Alloha, etc.).
     """
     loop = asyncio.get_event_loop()
     try:
-        html = await loop.run_in_executor(None, cloudscraper_get, iframe_url)
+        # === SCRAPINGBEE INTEGRATION === use ScrapingBee for iframe pages too
+        html = await loop.run_in_executor(None, _scrapingbee_get, iframe_url)
     except Exception as exc:
         logger.debug("[ZETFLIX DEBUG] Could not fetch iframe url=%s: %s", iframe_url, exc)
         return []
@@ -200,6 +255,7 @@ def _parse_search_results(html: str, base_url: str) -> list[dict]:
                 "source": "zetflix",
             })
 
+    logger.info("[SCRAPINGBEE] Found %d results", len(items))
     return items
 
 
@@ -209,7 +265,8 @@ async def _search_mirror(mirror: str, query: str) -> list[dict]:
     search_url = f"{mirror}index.php?{qs}"
     loop = asyncio.get_event_loop()
     try:
-        html = await loop.run_in_executor(None, cloudscraper_get, search_url)
+        # === SCRAPINGBEE INTEGRATION === route through ScrapingBee when enabled
+        html = await loop.run_in_executor(None, _scrapingbee_get, search_url)
         results = _parse_search_results(html, mirror)
         if results:
             return results
@@ -219,7 +276,7 @@ async def _search_mirror(mirror: str, query: str) -> list[dict]:
     # Fallback: try ?s= query param (WordPress-style)
     try:
         search_url2 = f"{mirror}?s={query}"
-        html2 = await loop.run_in_executor(None, cloudscraper_get, search_url2)
+        html2 = await loop.run_in_executor(None, _scrapingbee_get, search_url2)
         return _parse_search_results(html2, mirror)
     except Exception as exc2:
         logger.debug("[Zetflix] search via ?s= failed mirror=%s: %s", mirror, exc2)
@@ -337,7 +394,8 @@ def _extract_player_iframes(
 
 async def get_detail(url: str) -> dict:
     loop = asyncio.get_event_loop()
-    html = await loop.run_in_executor(None, cloudscraper_get, url)
+    # === SCRAPINGBEE INTEGRATION === use ScrapingBee for detail pages
+    html = await loop.run_in_executor(None, _scrapingbee_get, url)
     soup = BeautifulSoup(html, "lxml")
 
     parsed = urlparse(url)
@@ -386,3 +444,4 @@ async def get_detail(url: str) -> dict:
         "poster": poster,
         "files": files,
     }
+

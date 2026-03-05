@@ -37,6 +37,8 @@
         try { console.log.apply(console, ['[Easy-Mod]'].concat([].slice.call(arguments))); } catch (e) {}
     }
     log('loaded v' + VERSION);
+    // ScrapingBee is used server-side for Zetflix (controlled by USE_SCRAPINGBEE in .env)
+    console.log('[Easy-Mod] Using ScrapingBee for Zetflix');
 
     // -------------------------------------------------------
     // CSS — EXACT copy of modss_online_css template + easy-mod extras

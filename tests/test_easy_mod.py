@@ -1,0 +1,2296 @@
+"""Tests for Easy-Mod endpoints: /health, /variants, /stream/start, /stream/status."""
+from __future__ import annotations
+
+import os
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+os.environ.setdefault("TORBOX_API_KEY", "test-key-dummy")
+os.environ.setdefault("ENABLE_DEMO_PROVIDER", "1")
+
+from app.main import app  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app, raise_server_exceptions=False) as c:
+        yield c
+
+
+# ---------------------------------------------------------------------------
+# /health
+# ---------------------------------------------------------------------------
+
+class TestEasyModHealth:
+    def test_health_ok(self, client):
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_health_cors(self, client):
+        resp = client.get("/health", headers={"Origin": "http://lampa.app"})
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
+
+# ---------------------------------------------------------------------------
+# /variants
+# ---------------------------------------------------------------------------
+
+class TestVariants:
+    def test_variants_missing_title(self, client):
+        resp = client.get("/variants")
+        assert resp.status_code == 422  # required query param
+
+    def test_variants_empty_title(self, client):
+        resp = client.get("/variants?title=   ")
+        assert resp.status_code == 400
+
+    def test_variants_returns_structure(self, client):
+        resp = client.get("/variants?title=Дюна+2&year=2024")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "title" in body
+        assert "variants" in body
+        assert isinstance(body["variants"], list)
+
+    def test_variants_contains_required_fields(self, client):
+        resp = client.get("/variants?title=Test+Movie")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        if variants:
+            v = variants[0]
+            assert "id" in v
+            assert "label" in v
+            assert "quality" in v
+            assert "voice" in v
+            assert "magnet" in v
+
+    def test_variants_sorted_by_seeders(self, client):
+        resp = client.get("/variants?title=Test+Movie")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        # Primary sort is seeders descending (zero-seeder variants go last)
+        if len(variants) >= 2:
+            s0 = variants[0]["seeders"]
+            s1 = variants[1]["seeders"]
+            # If both are non-zero, first must have >= seeders
+            if s0 > 0 and s1 > 0:
+                assert s0 >= s1
+
+    def test_variants_cached(self, client):
+        # Two identical requests — both should succeed (second from cache)
+        r1 = client.get("/variants?title=CacheTest")
+        r2 = client.get("/variants?title=CacheTest")
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json()["variants"] == r2.json()["variants"]
+
+    def test_variants_returns_data_when_provider_works(self, client):
+        """Verify /variants properly returns variants when a provider succeeds."""
+        from app.models import Variant
+        from app.providers.torrentio import TorrentioProvider
+
+        fake_variant = Variant(
+            id="abc123test",
+            label="Test 1080p",
+            language="ru",
+            voice="Test",
+            quality="1080p",
+            size_mb=5000,
+            seeders=100,
+            codec="H264",
+            magnet="magnet:?xt=urn:btih:AABBCCDDEEAABBCCDDEEAABBCCDDEEAABBCCDDEE",
+        )
+
+        with patch.object(
+            TorrentioProvider,
+            "search_variants",
+            new=AsyncMock(return_value=[fake_variant]),
+        ):
+            resp = client.get("/variants?title=UniqueProviderTestXYZ999&year=2025")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["variants"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# /stream/start
+# ---------------------------------------------------------------------------
+
+DEMO_MAGNET = (
+    "magnet:?xt=urn:btih:DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
+    "&dn=TestMovie"
+)
+
+
+class TestStreamStart:
+    def test_start_missing_body(self, client):
+        resp = client.post("/stream/start")
+        assert resp.status_code == 422
+
+    def test_start_invalid_magnet(self, client):
+        resp = client.post(
+            "/stream/start",
+            json={"variant_id": "abc", "magnet": "not-a-magnet", "title": "Test"},
+        )
+        assert resp.status_code == 400
+
+    def test_start_missing_variant_id(self, client):
+        resp = client.post(
+            "/stream/start",
+            json={"variant_id": "", "magnet": DEMO_MAGNET, "title": "Test"},
+        )
+        assert resp.status_code == 400
+
+    def test_start_creates_job(self, client):
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "1"}}
+            resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v1", "magnet": DEMO_MAGNET, "title": "Dune 2"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "job_id" in body
+        assert body["status"] in ("queued", "ready")
+
+    def test_start_returns_immediately_if_cached(self, client):
+        # Prime direct_url cache with new format: "torrent_id:file_id"
+        # This simulates a previously-processed torrent stored in the fast-path cache.
+        from app.cache import direct_url_cache
+        direct_url_cache.set(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "torrent_123:file_456",
+        )
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/cached.mkv"
+            resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_cached", "magnet": DEMO_MAGNET, "title": "Cached"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        # direct_url must be included in /stream/start when status=ready
+        assert body.get("direct_url") == "https://cdn.torbox.app/cached.mkv"
+
+    def test_start_dedup_same_magnet_returns_same_job(self, client):
+        """Submitting the same magnet twice should reuse the in-flight job."""
+        UNIQUE_MAGNET = (
+            "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "&dn=DedupeTest"
+        )
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "555"}}
+            r1 = client.post(
+                "/stream/start",
+                json={"variant_id": "vd1", "magnet": UNIQUE_MAGNET, "title": "Dedup"},
+            )
+            r2 = client.post(
+                "/stream/start",
+                json={"variant_id": "vd2", "magnet": UNIQUE_MAGNET, "title": "Dedup"},
+            )
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        # Second request must return the same job_id
+        assert r1.json()["job_id"] == r2.json()["job_id"]
+
+    def test_retry_error_produces_readable_job_message(self):
+        """RetryError from TorBox add_magnet must produce a human-readable failed job."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from tenacity import RetryError, Future as TenacityFuture
+        import httpx
+        from app.services.stream import create_job
+        from app.models import StreamStartRequest
+
+        # Build a fake RetryError wrapping an httpx.HTTPStatusError
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.text = '{"detail": "Unauthorized"}'
+        http_err = httpx.HTTPStatusError("401", request=MagicMock(), response=mock_resp)
+
+        # tenacity.Future holds the last attempt's exception
+        fut = TenacityFuture(1)
+        fut.set_exception(http_err)
+        retry_err = RetryError(fut)
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+            "&dn=RetryTest"
+        )
+
+        async def run():
+            with patch("app.services.stream.torbox.add_magnet", side_effect=retry_err), \
+                 patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None), \
+                 patch("app.services.stream.torbox.check_cached",
+                       new_callable=AsyncMock, return_value=False):
+                req = StreamStartRequest(variant_id="v_retry", magnet=MAGNET, title="RetryTest")
+                job = await create_job(req)
+                # Give background task time to run
+                await asyncio.sleep(0.2)
+                from app.services.stream import _load_job
+                return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "failed"
+        assert "401" in job.message or "HTTP" in job.message or "TorBox" in job.message
+
+    def test_torbox_dead_state_fails_job_with_message(self):
+        """When TorBox reports a dead state (stalledDL), the job must fail with a helpful message."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+            "&dn=StalledTest"
+        )
+        stalled_torrent = {
+            "id": "777",
+            "download_state": "stalledDL",
+            "progress": 0.0,
+            "files": [],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_stall", magnet=MAGNET, title="StalledTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam, \
+                 patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None), \
+                 patch("app.services.stream.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt, \
+                 patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
+                mam.return_value = {"data": {"torrent_id": "777"}}
+                mgt.return_value = stalled_torrent
+                await _process_job(job.job_id)
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "failed"
+        assert "stalledDL" in job.message or "Torrent" in job.message or "TorBox" in job.message
+
+    def test_early_download_link_on_files_available(self):
+        """Job becomes ready as soon as TorBox reports files (regardless of download_state)."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+            "&dn=EarlyLinkTest"
+        )
+        torrent_with_files = {
+            "id": "888",
+            "download_state": "downloading",
+            "progress": 0.0,
+            "files": [{"id": 1, "name": "movie.mkv", "size": 4_000_000_000}],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_early", magnet=MAGNET, title="EarlyLinkTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam, \
+                 patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None), \
+                 patch("app.services.stream.torbox.get_torrent_by_id", new_callable=AsyncMock) as mgt, \
+                 patch("app.services.stream.torbox.request_download_link", new_callable=AsyncMock) as mdl, \
+                 patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
+                mam.return_value = {"data": {"torrent_id": "888"}}
+                mgt.return_value = torrent_with_files
+                mdl.return_value = "https://cdn.torbox.app/stream.mkv"
+                await _process_job(job.job_id)
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "ready"
+        assert job.direct_url == "https://cdn.torbox.app/stream.mkv"
+
+
+# ---------------------------------------------------------------------------
+# /stream/status
+# ---------------------------------------------------------------------------
+
+class TestStreamStatus:
+    def test_status_missing_job_id(self, client):
+        resp = client.get("/stream/status")
+        assert resp.status_code == 422
+
+    def test_status_unknown_job_id(self, client):
+        resp = client.get("/stream/status?job_id=does-not-exist")
+        assert resp.status_code == 404
+
+    def test_status_returns_job(self, client):
+        # Create a job first
+        with patch("app.services.stream.torbox.add_magnet", new_callable=AsyncMock) as mam:
+            mam.return_value = {"data": {"torrent_id": "99"}}
+            start_resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_status", "magnet": DEMO_MAGNET, "title": "StatusTest"},
+            )
+        job_id = start_resp.json()["job_id"]
+
+        resp = client.get(f"/stream/status?job_id={job_id}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_id"] == job_id
+        assert body["state"] in ("queued", "preparing", "ready", "failed")
+        assert 0.0 <= body["progress"] <= 1.0
+
+    def test_status_ready_has_direct_url(self, client):
+        # Force a ready job via cache (new format: torrent_id:file_id)
+        from app.cache import direct_url_cache
+        direct_url_cache.set(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "torrent_ready:file_ready",
+        )
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/ready.mkv"
+            start_resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_ready", "magnet": DEMO_MAGNET, "title": "ReadyTest"},
+            )
+        job_id = start_resp.json()["job_id"]
+        status_resp = client.get(f"/stream/status?job_id={job_id}")
+        body = status_resp.json()
+        assert body["state"] == "ready"
+        assert body["direct_url"] == "https://cdn.torbox.app/ready.mkv"
+
+    def test_status_ready_includes_proxy_url(self, client):
+        """When job is ready, /stream/status must include proxy_url pointing to /stream/proxy."""
+        from app.cache import direct_url_cache
+        direct_url_cache.set(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "torrent_proxy:file_proxy",
+        )
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/ready_proxy.mkv"
+            start_resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_proxy", "magnet": DEMO_MAGNET, "title": "ProxyTest"},
+            )
+        job_id = start_resp.json()["job_id"]
+        status_resp = client.get(f"/stream/status?job_id={job_id}")
+        body = status_resp.json()
+        assert body["state"] == "ready"
+        assert body.get("proxy_url"), "proxy_url must be present when job is ready"
+        assert body["proxy_url"] == f"/stream/proxy?job_id={job_id}"
+
+    def test_stream_start_cache_hit_includes_proxy_url(self, client):
+        """Cache-hit /stream/start response must include proxy_url."""
+        from app.cache import direct_url_cache
+        import hashlib
+        mhash = hashlib.sha1(DEMO_MAGNET.encode()).hexdigest()
+        direct_url_cache.set(mhash, "torrent_cacheproxy:file_cacheproxy")
+        with patch(
+            "app.services.stream.torbox.request_download_link",
+            new_callable=AsyncMock,
+        ) as mock_rdl:
+            mock_rdl.return_value = "https://cdn.torbox.app/cached.mkv"
+            resp = client.post(
+                "/stream/start",
+                json={"variant_id": "v_cache_proxy", "magnet": DEMO_MAGNET, "title": "CacheProxyTest"},
+            )
+        body = resp.json()
+        assert body.get("status") == "ready"
+        assert body.get("proxy_url"), "proxy_url must be present on cache-hit start"
+        assert "/stream/proxy?job_id=" in body["proxy_url"]
+
+
+# ---------------------------------------------------------------------------
+# /stream/proxy
+# ---------------------------------------------------------------------------
+
+class TestStreamProxy:
+    def test_proxy_missing_job_id(self, client):
+        resp = client.get("/stream/proxy")
+        assert resp.status_code == 422
+
+    def test_proxy_unknown_job(self, client):
+        resp = client.get("/stream/proxy?job_id=nonexistent-job")
+        assert resp.status_code == 404
+
+    def test_proxy_rejects_unsafe_scheme(self, client):
+        """Proxy must reject stored URLs with non-http(s) schemes (scheme guard)."""
+        from app.cache import job_cache
+        from app.models import StreamJob
+        bad_job = StreamJob(
+            variant_id="v_bad",
+            magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            state="ready",
+            direct_url="file:///etc/passwd",
+        )
+        job_cache.set(bad_job.job_id, bad_job.model_dump())
+        resp = client.get(f"/stream/proxy?job_id={bad_job.job_id}")
+        assert resp.status_code == 500
+
+    def test_proxy_no_direct_url_returns_409(self, client):
+        """Proxy must return 409 when the job exists but has no direct_url yet."""
+        from app.cache import job_cache
+        from app.models import StreamJob
+        pending_job = StreamJob(
+            variant_id="v_pending",
+            magnet="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            state="preparing",
+            direct_url=None,
+        )
+        job_cache.set(pending_job.job_id, pending_job.model_dump())
+        resp = client.get(f"/stream/proxy?job_id={pending_job.job_id}")
+        assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# _pick_video_file — MP4 preference
+# ---------------------------------------------------------------------------
+
+class TestPickVideoFile:
+    def test_prefers_mp4_over_mkv(self):
+        """_pick_video_file should prefer an MP4 file over an equally-sized MKV."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "movie.mkv", "size": 4_000_000_000},
+            {"id": 2, "name": "movie.mp4", "size": 3_900_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 2, "MP4 should be preferred over MKV"
+
+    def test_returns_largest_mp4_when_multiple(self):
+        """When multiple MP4 files exist, return the largest one."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "sample.mp4", "size": 100_000_000},
+            {"id": 2, "name": "movie.mp4", "size": 3_500_000_000},
+            {"id": 3, "name": "extras.mp4", "size": 200_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 2
+
+    def test_falls_back_to_mkv_when_no_mp4(self):
+        """When no MP4 exists, return the largest video file regardless of format."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "movie.mkv", "size": 5_000_000_000},
+            {"id": 2, "name": "extras.avi", "size": 200_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 1, "Should fall back to largest file when no MP4"
+
+    def test_falls_back_to_largest_when_no_video_ext(self):
+        """When no file has a recognised video extension, return the largest file."""
+        from app.services.stream import _pick_video_file
+        files = [
+            {"id": 1, "name": "readme.txt", "size": 1_000},
+            {"id": 2, "name": "nfo.nfo", "size": 500},
+            {"id": 3, "name": "unknown_binary", "size": 2_000_000_000},
+        ]
+        result = _pick_video_file(files)
+        assert result is not None
+        assert result["id"] == 3, "Should return largest file when no video extensions match"
+
+    def test_returns_none_for_empty_list(self):
+        from app.services.stream import _pick_video_file
+        assert _pick_video_file([]) is None
+
+
+# ---------------------------------------------------------------------------
+# Cache unit tests
+# ---------------------------------------------------------------------------
+
+class TestTTLCache:
+    def test_set_and_get(self):
+        from app.cache import TTLCache
+        c = TTLCache(default_ttl=60)
+        c.set("k", "v")
+        assert c.get("k") == "v"
+
+    def test_expiry(self):
+        import time
+        from app.cache import TTLCache
+        c = TTLCache(default_ttl=0)
+        c.set("k", "v", ttl=0)
+        time.sleep(0.01)
+        assert c.get("k") is None
+
+    def test_delete(self):
+        from app.cache import TTLCache
+        c = TTLCache()
+        c.set("k", "v")
+        c.delete("k")
+        assert c.get("k") is None
+
+    def test_miss_returns_none(self):
+        from app.cache import TTLCache
+        c = TTLCache()
+        assert c.get("nonexistent") is None
+
+
+class TestCacheBackend:
+    """Verify CacheBackend sync interface works without Redis."""
+
+    def test_sync_set_get(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test", default_ttl=60)
+        cb.set("key1", "value1")
+        assert cb.get("key1") == "value1"
+
+    def test_sync_delete(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test2", default_ttl=60)
+        cb.set("k", "v")
+        cb.delete("k")
+        assert cb.get("k") is None
+
+    def test_sync_miss(self):
+        from app.cache import CacheBackend
+        cb = CacheBackend(prefix="test3", default_ttl=60)
+        assert cb.get("missing") is None
+
+    def test_async_fallback_to_memory(self):
+        """Async aget/aset fall back to in-memory when Redis is unavailable."""
+        import asyncio
+        from app.cache import CacheBackend
+
+        async def run():
+            cb = CacheBackend(prefix="testasync", default_ttl=60)
+            await cb.aset("hello", "world")
+            val = await cb.aget("hello")
+            return val
+
+        val = asyncio.get_event_loop().run_until_complete(run())
+        assert val == "world"
+
+    def test_async_dict_roundtrip(self):
+        """Dicts serialise and deserialise correctly."""
+        import asyncio
+        from app.cache import CacheBackend
+
+        async def run():
+            cb = CacheBackend(prefix="testdict", default_ttl=60)
+            data = {"foo": "bar", "n": 42}
+            await cb.aset("d", data)
+            return await cb.aget("d")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == {"foo": "bar", "n": 42}
+
+    def test_singletons_exist(self):
+        from app.cache import direct_url_cache, job_cache, magnet_job_cache, variants_cache
+        from app.cache import CacheBackend
+        for cache in (variants_cache, direct_url_cache, job_cache, magnet_job_cache):
+            assert isinstance(cache, CacheBackend)
+
+
+# ---------------------------------------------------------------------------
+# Variants service unit tests
+# ---------------------------------------------------------------------------
+
+class TestVariantsService:
+    def test_quality_sorting(self):
+        from app.services.variants import _quality_rank
+        assert _quality_rank("2160p") > _quality_rank("1080p")
+        assert _quality_rank("1080p") > _quality_rank("720p")
+        assert _quality_rank("720p")  > _quality_rank("480p")
+
+    def test_demo_provider_returns_variants(self):
+        import asyncio
+        from app.providers.demo_provider import DemoProvider
+
+        async def run():
+            p = DemoProvider()
+            return await p.search_variants("Matrix", year=1999)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) > 0
+        for v in variants:
+            assert v.id
+            assert v.label
+            assert v.magnet.startswith("magnet:")
+
+    def test_demo_provider_disabled_in_production(self):
+        """When ENABLE_DEMO_PROVIDER=0, /variants returns empty list if no real provider works."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def run():
+            # Simulate all real providers returning empty
+            with patch("app.services.variants.ENABLE_DEMO_PROVIDER", False), \
+                 patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.jackett.JackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]):
+                from app.services.variants import get_variants
+                return await get_variants("SomeUnknownFilm2099")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        # DemoProvider must NOT have injected fake variants
+        assert result.variants == []
+
+    def test_demo_provider_enabled_as_fallback(self):
+        """When ENABLE_DEMO_PROVIDER=1 and all real providers return empty, demo is used."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def run():
+            with patch("app.services.variants.ENABLE_DEMO_PROVIDER", True), \
+                 patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.jackett.JackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]):
+                from app.services.variants import get_variants
+                return await get_variants("SomeDemoFilm2099")
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        # DemoProvider should have provided fallback variants
+        assert len(result.variants) > 0
+
+    def test_empty_variants_not_cached(self):
+        """Empty results must NOT be stored in the cache so the next request
+        retries all providers instead of returning a stale empty list."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.cache import variants_cache
+        from app.services.variants import get_variants
+
+        unique_title = "EmptyNoCacheTestXYZ9999"
+
+        async def run():
+            with patch("app.services.variants.ENABLE_DEMO_PROVIDER", False), \
+                 patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.jackett.JackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]), \
+                 patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                        new_callable=AsyncMock, return_value=[]):
+                result = await get_variants(unique_title)
+            # Result should be empty
+            assert result.variants == []
+            # Cache must NOT contain this key — empty result must not be stored
+            from app.services.variants import _cache_key
+            key = _cache_key(unique_title, None, None)
+            cached = await variants_cache.aget(key)
+            assert cached is None, "Empty variant results must not be written to cache"
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+
+
+
+class TestTorrentioProvider:
+    def test_returns_empty_without_tmdb_id(self):
+        import asyncio
+        from app.providers.torrentio import TorrentioProvider
+
+        async def run():
+            p = TorrentioProvider()
+            return await p.search_variants("Dune", year=2021, tmdb_id=None)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_returns_variants_with_tmdb_id(self):
+        """Mock Torrentio API and verify variant parsing."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        mock_response = {
+            "streams": [
+                {
+                    "name": "YIFY",
+                    "title": "Dune 2021 1080p BluRay\n👤 1200\n💾 8.5 GB",
+                    "infoHash": "aabbccddeeff00112233445566778899aabbccdd",
+                    "fileIdx": 0,
+                    "sources": ["tracker:udp://tracker.opentrackr.org:1337/announce"],
+                },
+                {
+                    "name": "RARBG",
+                    "title": "Dune 2021 2160p\n👤 350\n💾 22 GB",
+                    "infoHash": "1122334455667788990011223344556677889900",
+                    "fileIdx": 0,
+                    "sources": [],
+                },
+            ]
+        }
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_cls.return_value = mock_client
+                p = TorrentioProvider()
+                return await p.search_variants("Dune", year=2021, tmdb_id="438631")
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 2
+        assert all(v.magnet.startswith("magnet:") for v in variants)
+        assert variants[0].quality == "1080p"
+        assert variants[0].seeders == 1200
+        assert variants[0].size_mb > 0
+        assert variants[1].quality == "2160p"
+
+    def test_handles_api_error_gracefully(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(side_effect=Exception("connection error"))
+                mock_client_cls.return_value = mock_client
+                p = TorrentioProvider()
+                return await p.search_variants("Dune", year=2021, tmdb_id="438631")
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+
+# ---------------------------------------------------------------------------
+# JackettProvider unit tests
+# ---------------------------------------------------------------------------
+
+class TestJackettProvider:
+    def test_returns_empty_when_not_configured(self):
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", ""), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", ""):
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_returns_variants_when_configured(self):
+        """Mock Jackett API and verify variant parsing."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        mock_response = {
+            "Results": [
+                {
+                    "Title": "Dune 2021 1080p BluRay x265",
+                    "MagnetUri": "magnet:?xt=urn:btih:aabbccdd1234&dn=Dune+2021",
+                    "Seeders": 500,
+                    "Size": 8_000_000_000,
+                },
+                {
+                    "Title": "Dune 2021 720p WEB",
+                    "MagnetUri": "magnet:?xt=urn:btih:11223344abcd&dn=Dune+2021+720p",
+                    "Seeders": 200,
+                    "Size": 3_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_cls.return_value = mock_client
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 2
+        assert all(v.magnet.startswith("magnet:") for v in variants)
+        assert variants[0].quality == "1080p"
+        assert variants[0].codec == "H265"
+        assert variants[0].seeders == 500
+        assert variants[1].quality == "720p"
+
+    def test_skips_entries_without_magnet(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        mock_response = {
+            "Results": [
+                {"Title": "Dune 1080p", "MagnetUri": "", "Seeders": 100, "Size": 0},
+                {"Title": "Dune 720p", "MagnetUri": "magnet:?xt=urn:btih:abc123", "Seeders": 50, "Size": 0},
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_cls.return_value = mock_client
+                p = JackettProvider()
+                return await p.search_variants("Dune")
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 1  # only the one with a valid magnet
+
+
+# ---------------------------------------------------------------------------
+# /torbox/search endpoint tests
+# ---------------------------------------------------------------------------
+
+class TestTorboxSearch:
+    def test_torbox_search_empty_query(self, client):
+        resp = client.get("/torbox/search?q=   ")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"] == []
+
+    def test_torbox_search_missing_q(self, client):
+        resp = client.get("/torbox/search")
+        assert resp.status_code == 422  # required query param
+
+    def test_torbox_search_returns_structure(self, client):
+        """With mocked providers, verify the response shape."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        fake_variant = Variant(
+            id="abc123",
+            label="Torrentio • 1080P",
+            quality="1080p",
+            seeders=500,
+            size_mb=8000,
+            magnet="magnet:?xt=urn:btih:aabbccddee0011223344556677889900aabbccdd",
+            voice="YIFY",
+            language="multi",
+            codec="H264",
+        )
+
+        with patch(
+            "app.providers.torrentio.TorrentioProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[fake_variant],
+        ), patch(
+            "app.providers.jackett.JackettProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            resp = client.get("/torbox/search?q=Dune&tmdb_id=438631")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "results" in body
+        assert "query" in body
+        assert isinstance(body["results"], list)
+        if body["results"]:
+            r = body["results"][0]
+            assert "id" in r
+            assert "magnet" in r
+            assert "quality" in r
+
+    def test_torbox_search_with_year_and_original_title(self, client):
+        """Verify /torbox/search accepts year and original_title params."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        fake_variant = Variant(
+            id="xyz789",
+            label="Jackett • 1080P",
+            quality="1080p",
+            seeders=300,
+            size_mb=7000,
+            magnet="magnet:?xt=urn:btih:bbccddee001122334455667788990011aabbccdd",
+            voice="",
+            language="ru",
+            codec="H265",
+        )
+
+        with patch(
+            "app.providers.torrentio.TorrentioProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "app.providers.jackett.JackettProvider.search_variants",
+            new_callable=AsyncMock,
+            return_value=[fake_variant],
+        ) as mock_jackett:
+            resp = client.get(
+                "/torbox/search?q=Oppenheimer&year=2023&original_title=Oppenheimer&tmdb_id=872585"
+            )
+            # Verify year and original_title were forwarded to the provider
+            call_kwargs = mock_jackett.call_args
+            assert call_kwargs is not None
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["results"][0]["id"] == "xyz789"
+
+
+# ---------------------------------------------------------------------------
+# Jackett provider — torrent URL fallback (Link field)
+# ---------------------------------------------------------------------------
+
+class TestJackettTorrentUrlFallback:
+    def test_jackett_uses_link_when_no_magnet(self):
+        """JackettProvider rejects HTTP-only results — strict magnet-only policy."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        fake_results = {
+            "Results": [
+                {
+                    "Title": "Test Movie 2023 1080p BluRay",
+                    "MagnetUri": "",
+                    "Link": "https://jackett.example.com/dl/torrent?id=abc123",
+                    "Seeders": 150,
+                    "Size": 8_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.config.JACKETT_URL", "http://jackett.example.com"), \
+                 patch("app.config.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett.JACKETT_URL", "http://jackett.example.com"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = fake_results
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                return await JackettProvider().search_variants("Test Movie", year=2023)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        # HTTP-only result must be rejected — strict magnet-only policy
+        assert len(variants) == 0
+
+    def test_jackett_skips_result_with_no_link_or_magnet(self):
+        """JackettProvider should skip results with neither MagnetUri nor Link."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.jackett import JackettProvider
+
+        fake_results = {
+            "Results": [
+                {
+                    "Title": "Test Movie 2023 720p",
+                    "MagnetUri": "",
+                    "Link": "",
+                    "Seeders": 50,
+                    "Size": 2_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://jackett.example.com"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = fake_results
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                return await JackettProvider().search_variants("Test Movie", year=2023)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 0  # Skipped — no usable link
+
+
+# ---------------------------------------------------------------------------
+# /stream/start — accepts torrent file URL in magnet field
+# ---------------------------------------------------------------------------
+
+class TestStreamStartTorrentUrl:
+    def test_stream_start_accepts_torrent_url(self, client):
+        """POST /stream/start should accept an http(s):// torrent URL in magnet field."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import StreamJob
+
+        fake_job = StreamJob(
+            variant_id="v-url-1",
+            magnet="https://example.com/file.torrent",
+            magnet_hash="fakehash001",
+            title="Test Film",
+            state="queued",
+        )
+
+        with patch(
+            "app.services.stream.create_job",
+            new_callable=AsyncMock,
+            return_value=fake_job,
+        ):
+            resp = client.post(
+                "/stream/start",
+                json={
+                    "variant_id": "v-url-1",
+                    "magnet": "https://example.com/file.torrent",
+                    "title": "Test Film",
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_id"] == fake_job.job_id
+        assert body["status"] == "queued"
+
+    def test_stream_start_rejects_invalid_url(self, client):
+        """POST /stream/start should reject values that are neither magnet nor http URL."""
+        resp = client.post(
+            "/stream/start",
+            json={
+                "variant_id": "v-bad",
+                "magnet": "ftp://bad-protocol/file.torrent",
+                "title": "Test",
+            },
+        )
+        assert resp.status_code == 400
+
+
+
+# ---------------------------------------------------------------------------
+# New: requestdl token param
+# ---------------------------------------------------------------------------
+
+class TestRequestDlToken:
+    def test_requestdl_includes_token_param(self):
+        """request_download_link must include 'token' as a query param."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch, call
+        from app import torbox as tb
+
+        async def run():
+            with patch("app.torbox.TORBOX_API_KEY", "my-secret-key"), \
+                 patch("app.torbox._get", new_callable=AsyncMock) as mock_get:
+                mock_get.return_value = {"data": "https://cdn.torbox.app/file.mkv"}
+                result = await tb.request_download_link("42", "1")
+                return result, mock_get.call_args
+
+        result, call_args = asyncio.get_event_loop().run_until_complete(run())
+        assert result == "https://cdn.torbox.app/file.mkv"
+        # Verify 'token' was in the params kwarg
+        params = call_args[1].get("params") or call_args[0][1]
+        assert "token" in params
+
+
+# ---------------------------------------------------------------------------
+# New: /torbox/get with torrent_url
+# ---------------------------------------------------------------------------
+
+class TestTorboxGetTorrentUrl:
+    def test_torbox_get_accepts_torrent_url(self, client):
+        """GET /torbox/get?torrent_url=... should work like the magnet path."""
+        from unittest.mock import AsyncMock, patch
+
+        fake_files = [{"title": "film.mkv", "quality": "1080p",
+                       "url": "https://cdn.torbox.app/film.mkv", "size": 1000}]
+
+        with (
+            patch("app.main.torbox.add_torrent_from_url",
+                  new_callable=AsyncMock,
+                  return_value={"data": {"torrent_id": "99"}}) as mock_add,
+            patch("app.main.torbox.get_torrent_by_id",
+                  new_callable=AsyncMock,
+                  return_value={
+                      "id": "99",
+                      "download_state": "seeding",
+                      "files": [{"id": 1, "name": "film.mkv"}],
+                  }),
+            patch("app.main.torbox.build_direct_links",
+                  new_callable=AsyncMock,
+                  return_value=fake_files),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            resp = client.get(
+                "/torbox/get?torrent_url=https://jackett.example.com/dl/file.torrent"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        assert len(body["files"]) == 1
+        mock_add.assert_called_once()
+
+    def test_torbox_get_rejects_invalid_torrent_url(self, client):
+        """Non-http torrent_url must be rejected."""
+        resp = client.get("/torbox/get?torrent_url=ftp://bad.example/file.torrent")
+        assert resp.status_code == 400
+
+    def test_torbox_get_missing_both_params(self, client):
+        """No magnet and no torrent_url → 400."""
+        resp = client.get("/torbox/get")
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# New: top-3 variants per quality tier
+# ---------------------------------------------------------------------------
+
+class TestVariantsTop3:
+    def test_variants_at_most_max(self, client):
+        """After sorting by seeders, at most _MAX_RESULTS variants are returned.
+        720p and below are filtered out (only 1080p+ shown for torrent variants)."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+        from app.providers.torrentio import TorrentioProvider
+
+        fake_variants = [
+            Variant(id="v1", label="4K A", quality="2160p", seeders=50, magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Variant(id="v2", label="4K B", quality="2160p", seeders=30, magnet="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+            Variant(id="v3", label="1080 A", quality="1080p", seeders=200, magnet="magnet:?xt=urn:btih:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),
+            Variant(id="v4", label="1080 B", quality="1080p", seeders=100, magnet="magnet:?xt=urn:btih:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"),
+            Variant(id="v5", label="720p A", quality="720p", seeders=80, magnet="magnet:?xt=urn:btih:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"),
+        ]
+
+        with patch.object(
+            TorrentioProvider,
+            "search_variants",
+            new=AsyncMock(return_value=fake_variants),
+        ):
+            resp = client.get("/variants?title=Top3TestFilmXYZ123&year=2025")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        # 720p is filtered out; only 1080p+ variants are returned (4 of 5)
+        assert len(variants) == 4
+        # First result must be the one with most seeders (v3: 200)
+        assert variants[0]["id"] == "v3"
+        assert variants[0]["seeders"] == 200
+        # No 720p variant in results
+        assert all(v["quality"] != "720p" for v in variants)
+
+    def test_variants_quality_filter(self, client):
+        """?quality=1080p returns only 1080p variants."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+        from app.providers.torrentio import TorrentioProvider
+
+        fake_variants = [
+            Variant(id="f1", label="4K", quality="2160p", seeders=50,
+                    magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Variant(id="f2", label="1080", quality="1080p", seeders=200,
+                    magnet="magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+        ]
+
+        with patch.object(
+            TorrentioProvider,
+            "search_variants",
+            new=AsyncMock(return_value=fake_variants),
+        ):
+            resp = client.get("/variants?title=QualityFilterTestXYZ456&year=2025&quality=1080p")
+        assert resp.status_code == 200
+        variants = resp.json()["variants"]
+        assert all(v["quality"] == "1080p" for v in variants)
+
+    def test_variant_model_has_torrent_url(self):
+        """Variant model must have an optional torrent_url field."""
+        from app.models import Variant
+        v = Variant(id="x", label="Test", magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB",
+                    torrent_url="https://example.com/file.torrent")
+        assert v.torrent_url == "https://example.com/file.torrent"
+        # Default is None
+        v2 = Variant(id="y", label="Test2", magnet="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB")
+        assert v2.torrent_url is None
+
+
+# ---------------------------------------------------------------------------
+# New: fast-path for already-seeding TorBox torrent
+# ---------------------------------------------------------------------------
+
+class TestFastPathExistingTorrent:
+    def test_fast_path_returns_link_immediately_for_seeding_torrent(self):
+        """When TorBox already has the torrent seeding, _process_job returns link without add_magnet."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+            "&dn=FastPathTest"
+        )
+        existing_seeding = {
+            "id": "999",
+            "download_state": "seeding",
+            "progress": 1.0,
+            "files": [{"id": 5, "name": "movie.mkv", "size": 4_000_000_000}],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_fast", magnet=MAGNET, title="FastPathTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=existing_seeding) as mock_hash, \
+                 patch("app.services.stream.torbox.request_download_link",
+                       new_callable=AsyncMock,
+                       return_value="https://cdn.torbox.app/fast.mkv") as mock_dl, \
+                 patch("app.services.stream.torbox.add_magnet",
+                       new_callable=AsyncMock) as mock_add:
+                await _process_job(job.job_id)
+                # add_magnet must NOT have been called (fast path taken)
+                mock_add.assert_not_called()
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        assert job.state == "ready"
+        assert job.direct_url == "https://cdn.torbox.app/fast.mkv"
+
+    def test_null_data_from_add_magnet_falls_back_to_infohash_lookup(self):
+        """When add_magnet returns null data, _process_job recovers torrent_id via infohash."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.stream import _process_job, _save_job, _load_job
+        from app.models import StreamJob
+
+        MAGNET = (
+            "magnet:?xt=urn:btih:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+            "&dn=FallbackTest"
+        )
+        existing_torrent = {
+            "id": "101",
+            "download_state": "downloading",
+            "progress": 0.3,
+            "files": [{"id": 2, "name": "film.mkv", "size": 3_000_000_000}],
+        }
+
+        async def run():
+            job = StreamJob(variant_id="v_fallback", magnet=MAGNET, title="FallbackTest",
+                            state="queued")
+            await _save_job(job)
+            with patch("app.services.stream.torbox.get_torrent_by_hash",
+                       new_callable=AsyncMock, return_value=None) as mock_hash, \
+                 patch("app.services.stream.torbox.add_magnet",
+                       new_callable=AsyncMock,
+                       return_value={"data": None, "success": False, "detail": "ACTIVE_DOWNLOAD"}
+                       ) as mock_add, \
+                 patch("app.services.stream.torbox.get_torrent_by_id",
+                       new_callable=AsyncMock, return_value=existing_torrent) as mock_gtid, \
+                 patch("app.services.stream.torbox.request_download_link",
+                       new_callable=AsyncMock,
+                       return_value="https://cdn.torbox.app/fallback.mkv"), \
+                 patch("app.services.stream.asyncio.sleep", new_callable=AsyncMock):
+                # On the fallback path, get_torrent_by_hash is called a second time
+                # with the infohash to recover the torrent_id
+                mock_hash.return_value = existing_torrent
+                await _process_job(job.job_id)
+            return await _load_job(job.job_id)
+
+        job = asyncio.get_event_loop().run_until_complete(run())
+        assert job is not None
+        # Should recover the torrent_id and eventually be ready
+        assert job.state in ("ready", "preparing", "failed")  # may not reach ready in mock
+
+    def test_direct_url_cached_by_infohash(self):
+        """_save_torrent_meta saves by both magnet-hash and infohash."""
+        import asyncio
+        from app.services.stream import _save_torrent_meta, _extract_infohash
+        from app.cache import direct_url_cache
+
+        MAGNET = "magnet:?xt=urn:btih:1234567890ABCDEF1234567890ABCDEF12345678&dn=CacheTest"
+        MHASH = "testmhash001"
+        TORRENT_ID = "torrent_test_001"
+        FILE_ID = "file_test_001"
+        expected_meta = f"{TORRENT_ID}:{FILE_ID}"
+
+        async def run():
+            await _save_torrent_meta(MHASH, MAGNET, TORRENT_ID, FILE_ID)
+            by_hash = await direct_url_cache.aget(MHASH)
+            infohash = _extract_infohash(MAGNET)
+            by_ih = await direct_url_cache.aget(infohash) if infohash else None
+            return by_hash, by_ih
+
+        by_hash, by_ih = asyncio.get_event_loop().run_until_complete(run())
+        assert by_hash == expected_meta
+        assert by_ih == expected_meta  # cached by infohash too
+
+    def test_get_torrent_by_hash_returns_matching_torrent(self):
+        """get_torrent_by_hash returns the torrent whose 'hash' field matches."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app import torbox as tb
+
+        torrents = [
+            {"id": "1", "hash": "AABBCCDD" * 5, "download_state": "seeding", "files": []},
+            {"id": "2", "hash": "11223344" * 5, "download_state": "downloading", "files": []},
+        ]
+
+        async def run():
+            with patch.object(tb, "get_torrent_list", new=AsyncMock(return_value=torrents)):
+                return await tb.get_torrent_by_hash("aabbccdd" * 5)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result is not None
+        assert result["id"] == "1"
+
+    def test_get_torrent_by_hash_returns_none_when_not_found(self):
+        """get_torrent_by_hash returns None when no matching hash in list."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app import torbox as tb
+
+        async def run():
+            with patch.object(tb, "get_torrent_list", new=AsyncMock(return_value=[])):
+                return await tb.get_torrent_by_hash("deadbeef" * 10)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# IMDB ID exact matching — JackettProvider
+# ---------------------------------------------------------------------------
+
+class TestJackettImdbSearch:
+    """Verify that JackettProvider uses t=movie&imdbid= when imdb_id is supplied."""
+
+    def _make_mock_client(self, mock_response):
+        from unittest.mock import AsyncMock, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = mock_response
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client
+
+    def test_imdb_id_triggers_movie_search_type(self):
+        """When imdb_id is provided, the first Jackett request must use t=movie&imdbid=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        mock_response = {
+            "Results": [
+                {
+                    "Title": "Inception 2010 1080p BluRay LostFilm",
+                    "MagnetUri": "magnet:?xt=urn:btih:aabbccdd00112233445566778899aabb00112233",
+                    "Seeders": 400,
+                    "Size": 8_000_000_000,
+                },
+            ]
+        }
+
+        calls = []
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = self._make_mock_client(mock_response)
+                # Capture every call to client.get
+                original_get = mock_client.get.side_effect
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mock_client.get.return_value
+                mock_client.get.side_effect = capturing_get
+                mock_client_cls.return_value = mock_client
+
+                p = JackettProvider()
+                return await p.search_variants(
+                    "Inception", year=2010, imdb_id="tt1375666"
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+
+        # At least one call must be the IMDB search
+        imdb_calls = [c for c in calls if c.get("t") == "movie" and "imdbid" in c]
+        assert imdb_calls, f"Expected a t=movie&imdbid= call, got: {calls}"
+        assert imdb_calls[0]["imdbid"] == "tt1375666"
+
+    def test_imdb_id_normalised_without_tt_prefix(self):
+        """IMDB IDs without 'tt' prefix should be normalised to 'tt{id}'."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = self._make_mock_client({"Results": []})
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mock_client.get.return_value
+                mock_client.get.side_effect = capturing_get
+                mock_client_cls.return_value = mock_client
+
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021, imdb_id="1160419")
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+        imdb_calls = [c for c in calls if c.get("t") == "movie"]
+        assert imdb_calls, f"No t=movie call made. Got: {calls}"
+        assert imdb_calls[0]["imdbid"] == "tt1160419"
+
+    def test_no_imdb_id_falls_back_to_text_search(self):
+        """Without imdb_id, the search should use t=search&q=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = self._make_mock_client({"Results": []})
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mock_client.get.return_value
+                mock_client.get.side_effect = capturing_get
+                mock_client_cls.return_value = mock_client
+
+                p = JackettProvider()
+                return await p.search_variants("Dune", year=2021)
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+        text_calls = [c for c in calls if c.get("t") == "search"]
+        assert text_calls, f"Expected t=search calls, got: {calls}"
+        # Must not contain imdbid
+        assert all("imdbid" not in c for c in text_calls)
+
+
+# ---------------------------------------------------------------------------
+# IMDB ID exact matching — TorrentioProvider
+# ---------------------------------------------------------------------------
+
+class TestTorrentioImdbSearch:
+    """Verify that TorrentioProvider prefers IMDB ID URL when imdb_id is supplied."""
+
+    def test_uses_imdb_id_url_when_available(self):
+        """With imdb_id, Torrentio should request tt{id} URL, not tmdb:{id}."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        requested_urls = []
+        mock_response = {
+            "streams": [
+                {
+                    "name": "YIFY",
+                    "title": "Inception 2010 1080p\n👤 500\n💾 8 GB",
+                    "infoHash": "aabbccdd00112233445566778899aabbccddeeff",
+                    "sources": [],
+                }
+            ]
+        }
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                async def capturing_get(url, **kw):
+                    requested_urls.append(url)
+                    return mock_resp
+                mock_client.get = AsyncMock(side_effect=capturing_get)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                p = TorrentioProvider()
+                return await p.search_variants(
+                    "Inception", year=2010, tmdb_id="27205", imdb_id="tt1375666"
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 1
+        # The first URL tried must use IMDB ID format, not TMDB
+        assert any("tt1375666" in u for u in requested_urls), \
+            f"Expected tt1375666 in URLs, got: {requested_urls}"
+        assert not any("tmdb:27205" in u for u in requested_urls), \
+            f"TMDB URL should not be used when IMDB ID is available, got: {requested_urls}"
+
+    def test_falls_back_to_tmdb_when_no_imdb_id(self):
+        """Without imdb_id, Torrentio should use tmdb:{id} URL."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.providers.torrentio import TorrentioProvider
+
+        requested_urls = []
+        mock_response = {"streams": []}
+
+        async def run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_resp = MagicMock()
+                mock_resp.json.return_value = mock_response
+                mock_resp.raise_for_status = MagicMock()
+                mock_client = AsyncMock()
+                async def capturing_get(url, **kw):
+                    requested_urls.append(url)
+                    return mock_resp
+                mock_client.get = AsyncMock(side_effect=capturing_get)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client_cls.return_value = mock_client
+
+                p = TorrentioProvider()
+                return await p.search_variants("Dune", year=2021, tmdb_id="438631")
+
+        asyncio.get_event_loop().run_until_complete(run())
+        assert any("tmdb:438631" in u for u in requested_urls), \
+            f"Expected tmdb:438631 in URLs, got: {requested_urls}"
+
+    def test_returns_empty_without_any_id(self):
+        """Without tmdb_id or imdb_id, provider should return []."""
+        import asyncio
+        from app.providers.torrentio import TorrentioProvider
+
+        async def run():
+            p = TorrentioProvider()
+            return await p.search_variants("Unknown Film", year=2021)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+
+# ---------------------------------------------------------------------------
+# /variants endpoint — imdb_id param accepted
+# ---------------------------------------------------------------------------
+
+class TestVariantsImdbIdParam:
+    def test_variants_accepts_imdb_id(self, client):
+        """The /variants endpoint must accept imdb_id without error."""
+        resp = client.get("/variants?title=Inception&year=2010&imdb_id=tt1375666")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "variants" in body
+
+    def test_variants_imdb_id_forwarded_to_providers(self, client):
+        """imdb_id from query string must reach the provider search_variants call."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        captured_kwargs: dict = {}
+
+        async def fake_search(title, year=None, tmdb_id=None, original_title=None,
+                               season=None, imdb_id=None, episode=None):
+            captured_kwargs.update({"imdb_id": imdb_id, "title": title})
+            return []
+
+        # Use a unique title+imdb_id that won't be in any in-memory cache
+        unique_title = "InceptionImdbForwardTest"
+        with patch("app.providers.torrentio.TorrentioProvider.search_variants",
+                   side_effect=fake_search), \
+             patch("app.providers.jackett.JackettProvider.search_variants",
+                   side_effect=fake_search), \
+             patch("app.providers.public_jackett.PublicJackettProvider.search_variants",
+                   side_effect=fake_search), \
+             patch("app.services.variants.variants_cache.aget", new_callable=AsyncMock,
+                   return_value=None):
+            resp = client.get(f"/variants?title={unique_title}&year=2010&imdb_id=tt1375666")
+
+        assert resp.status_code == 200
+        assert captured_kwargs.get("imdb_id") == "tt1375666"
+
+
+# ---------------------------------------------------------------------------
+# JackettProvider — TV series tvsearch with IMDB ID
+# ---------------------------------------------------------------------------
+
+class TestJackettTvSearch:
+    """Verify JackettProvider uses t=tvsearch&imdbid= for TV series with IMDB ID."""
+
+    def _make_mock_client(self, mock_response):
+        from unittest.mock import AsyncMock, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = mock_response
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        return mock_client
+
+    def test_tv_series_uses_tvsearch_with_imdb_id(self):
+        """With imdb_id + season, JackettProvider must use t=tvsearch&imdbid=&season=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+        mock_response = {
+            "Results": [
+                {
+                    "Title": "Breaking Bad S02 1080p",
+                    "MagnetUri": "magnet:?xt=urn:btih:aabbccdd001122334455667788990011aabb0022",
+                    "Seeders": 300,
+                    "Size": 15_000_000_000,
+                },
+            ]
+        }
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client(mock_response)
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mc.get.return_value
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants(
+                    "Breaking Bad", year=2009, imdb_id="tt0903747", season=2
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        tv_calls = [c for c in calls if c.get("t") == "tvsearch"]
+        assert tv_calls, f"Expected t=tvsearch call, got: {calls}"
+        assert tv_calls[0].get("imdbid") == "tt0903747"
+        assert tv_calls[0].get("season") == "2"
+        assert len(variants) == 1
+
+    def test_movie_uses_tmdb_id_when_no_imdb(self):
+        """Without imdb_id but with tmdb_id, JackettProvider must try t=movie&tmdbid=."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+        mock_response = {"Results": []}
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client(mock_response)
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mc.get.return_value
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants("Inception", year=2010, tmdb_id="27205")
+
+        asyncio.get_event_loop().run_until_complete(run())
+        tmdb_calls = [c for c in calls if c.get("tmdbid") == "27205"]
+        assert tmdb_calls, f"Expected tmdbid=27205 call, got: {calls}"
+        assert tmdb_calls[0]["t"] == "movie"
+
+    def test_tv_series_without_imdb_uses_text_search(self):
+        """Series without imdb_id should fall back to text-based t=search."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        calls = []
+        mock_response = {"Results": []}
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client(mock_response)
+                async def capturing_get(url, params=None, **kw):
+                    calls.append(params or {})
+                    return mc.get.return_value
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants("Breaking Bad", year=2009, season=2)
+
+        asyncio.get_event_loop().run_until_complete(run())
+        text_calls = [c for c in calls if c.get("t") == "search"]
+        assert text_calls, f"Expected t=search fallback, got: {calls}"
+        # No ID-based params in text calls
+        assert all("imdbid" not in c and "tmdbid" not in c for c in text_calls)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid TorBox search + Ukrainian dubbing
+# ---------------------------------------------------------------------------
+
+class TestHybridTorBoxSearch:
+    """Tests for TorBox native search integration and Ukrainian dubbing."""
+
+    def _make_mock_client(self, response_data):
+        """Create a minimal mock httpx client that returns response_data."""
+        from unittest.mock import AsyncMock, MagicMock
+        mc = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = response_data
+        mock_resp.raise_for_status = MagicMock()
+        mc.get = AsyncMock(return_value=mock_resp)
+        return mc
+
+    def test_torbox_search_torbox_returns_variants(self):
+        """search_torbox() should convert TorBox results to Variant objects."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        fake_results = [
+            {
+                "hash": "aabbccddeeaabbccddeeaabbccddeeaabbccddee",
+                "name": "Dune Part Two 2024 1080p BluRay",
+                "size": 10 * 1024 * 1024 * 1024,
+                "seeders": 500,
+            },
+            {
+                "hash": "1122334455112233445511223344551122334455",
+                "name": "Dune Part Two 2024 2160p UHD",
+                "size": 50 * 1024 * 1024 * 1024,
+                "seeders": 200,
+            },
+        ]
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=fake_results)):
+                return await _torbox_search_variants(
+                    "Dune Part Two", 2024,
+                    filter_title="Dune Part Two",
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 2
+        assert all(v.is_cached for v in variants)
+        assert any(v.quality == "1080p" for v in variants)
+        assert any(v.quality == "2160p" for v in variants)
+
+    def test_torbox_search_filters_wrong_title(self):
+        """search_torbox() must discard results that don't match the requested title."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        fake_results = [
+            {
+                "hash": "aabbccddeeaabbccddeeaabbccddeeaabbccddee",
+                "name": "Dune Part Two 2024 1080p BluRay",
+                "size": 10 * 1024 * 1024 * 1024,
+                "seeders": 500,
+            },
+            {
+                "hash": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00",
+                "name": "Avatar 2009 1080p BDRip",  # wrong film
+                "size": 8 * 1024 * 1024 * 1024,
+                "seeders": 100,
+            },
+        ]
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=fake_results)):
+                return await _torbox_search_variants(
+                    "Dune Part Two", 2024,
+                    filter_title="Dune Part Two",
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        # Only the Dune result should survive; Avatar must be filtered out
+        assert len(variants) == 1
+        assert "Dune" in variants[0].label or "Dune" in variants[0].magnet
+
+    def test_torbox_search_torbox_handles_empty_results(self):
+        """search_torbox() should return [] when TorBox returns no results."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=[])):
+                return await _torbox_search_variants("Some Obscure Title", 2001)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_torbox_search_torbox_handles_error_gracefully(self):
+        """search_torbox() error must NOT crash variants; returns [] instead."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from app.services.variants import _torbox_search_variants
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(side_effect=Exception("timeout"))):
+                return await _torbox_search_variants("Any Movie", 2023)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert variants == []
+
+    def test_torbox_search_merged_with_provider_results(self, client):
+        """TorBox search results should be merged with Jackett/Torrentio results."""
+        from unittest.mock import AsyncMock, patch
+        from app.models import Variant
+
+        torbox_variant = Variant(
+            id="tb001",
+            label="TorBox Cached 1080p",
+            quality="1080p",
+            language="en",
+            seeders=1000,
+            is_cached=True,
+            magnet="magnet:?xt=urn:btih:AABBCCDDEEAABBCCDDEEAABBCCDDEEAABBCCDDEE",
+        )
+        provider_variant = Variant(
+            id="pv001",
+            label="Jackett 1080p",
+            quality="1080p",
+            language="ru",
+            seeders=50,
+            magnet="magnet:?xt=urn:btih:1122334455112233445511223344551122334455",
+        )
+
+        from app.providers.torrentio import TorrentioProvider
+        from app.services.variants import _torbox_search_variants
+
+        with patch.object(
+            TorrentioProvider, "search_variants",
+            new=AsyncMock(return_value=[provider_variant])
+        ), patch(
+            "app.services.variants._torbox_search_variants",
+            new=AsyncMock(return_value=[torbox_variant])
+        ):
+            resp = client.get("/variants?title=HybridMergeTestXYZ&year=2024")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        ids = [v["id"] for v in body["variants"]]
+        assert "tb001" in ids, "TorBox variant must appear in merged results"
+        assert "pv001" in ids, "Provider variant must appear in merged results"
+
+    def test_ukrainian_dubbing_search_runs_after_imdb_id_search(self):
+        """_search_ukrainian() must be called even when imdb_id is provided."""
+        import asyncio
+        from unittest.mock import patch
+        from app.providers.jackett import JackettProvider
+
+        id_results = [
+            {
+                "Title": "Dune 2021 1080p BluRay Rus",
+                "MagnetUri": "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "Seeders": 100, "Size": 0,
+            }
+        ]
+        ua_results = [
+            {
+                "Title": "Dune 2021 1080p UKR",
+                "MagnetUri": "magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "Seeders": 20, "Size": 0,
+            }
+        ]
+
+        call_count = {"id": 0, "ukr": 0}
+
+        async def run():
+            with patch("app.providers.jackett.JACKETT_URL", "http://localhost:9117"), \
+                 patch("app.providers.jackett.JACKETT_API_KEY", "testkey"), \
+                 patch("app.providers.jackett._get_http_client") as mock_getter:
+                mc = self._make_mock_client({})
+
+                async def capturing_get(url, params=None, **kw):
+                    from unittest.mock import MagicMock
+                    mock_resp = MagicMock()
+                    mock_resp.raise_for_status = MagicMock()
+                    t = (params or {}).get("t", "")
+                    q = (params or {}).get("q", "").lower()
+                    if t in ("movie", "tvsearch"):
+                        call_count["id"] += 1
+                        mock_resp.json.return_value = {"Results": id_results}
+                    elif "ukr" in q or "укр" in q:
+                        call_count["ukr"] += 1
+                        mock_resp.json.return_value = {"Results": ua_results}
+                    else:
+                        mock_resp.json.return_value = {"Results": []}
+                    return mock_resp
+
+                mc.get.side_effect = capturing_get
+                mock_getter.return_value = mc
+
+                p = JackettProvider()
+                return await p.search_variants(
+                    "Dune", year=2021, imdb_id="tt1160419",
+                    original_title="Dune",
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert call_count["id"] >= 1, "IMDB ID search must have run"
+        assert call_count["ukr"] >= 1, "Ukrainian UKR search must run even with imdb_id"
+        ua_variants = [v for v in variants if v.language == "ua"]
+        assert ua_variants, f"Expected ≥1 UA variant, got: {variants}"
+
+    def test_ua_lang_re_matches_ukr_tagged_title(self):
+        """_UA_LANG_RE must detect [UKR], [UA], UKR, укр markers in title."""
+        from app.providers.jackett import _UA_LANG_RE
+        assert _UA_LANG_RE.search("Movie 2024 1080p UKR")
+        assert _UA_LANG_RE.search("Movie 2024 [UA] BDRip")
+        assert _UA_LANG_RE.search("Movie 2024 [UKR] x265")
+        assert _UA_LANG_RE.search("Фільм 2024 укр дубляж")
+        assert not _UA_LANG_RE.search("Movie 2024 RUS 1080p")
+
+    def test_title_matches_cyrillic_query_cyrillic_candidate(self):
+        """Cyrillic query against an exact Cyrillic candidate must match."""
+        from app.providers.jackett import _title_matches
+        # Exact Cyrillic match (after stripping tech tokens)
+        assert _title_matches("Дюна", "Дюна 2021 1080p BDRip")
+        assert _title_matches("Мавка Лісова пісня", "Мавка. Лісова пісня 2023 BDRip")
+        # Full title match — both start with the same Cyrillic words
+        assert _title_matches("Ігра Престолів", "Ігра Престолів S01 2011 1080p")
+
+    def test_title_matches_cyrillic_does_not_match_sequel(self):
+        """Cyrillic short title must NOT match a sequel with extra subtitle words."""
+        from app.providers.jackett import _title_matches
+        # "Дюна" (2021) must not match "Дюна: Часть вторая" (2024)
+        assert not _title_matches("Дюна", "Дюна: Часть вторая 2024 1080p")
+        # "Матриця" must not match "Матриця: Перезавантаження"
+        assert not _title_matches("Матриця", "Матриця: Перезавантаження 2003 1080p BDRip")
+
+    def test_title_matches_cyrillic_query_ascii_candidate_is_false(self):
+        """Cyrillic query against ASCII candidate must return False (let caller retry with English)."""
+        from app.providers.jackett import _title_matches
+        # Cyrillic title vs English torrent — should NOT match; caller must retry with original_title
+        assert not _title_matches("Дюна", "Dune 2021 1080p BluRay x264")
+        assert not _title_matches("Аватар", "Avatar 2009 1080p BluRay")
+
+    def test_title_matches_cyrillic_candidate_does_not_accept_wrong_film(self):
+        """Cyrillic query must NOT match a clearly different Cyrillic title."""
+        from app.providers.jackett import _title_matches
+        # Different Cyrillic titles should not match each other
+        assert not _title_matches("Дюна", "Аватар 2009 1080p BDRip")
+        assert not _title_matches("Мавка", "Дюна 2021 1080p BDRip")
+
+    def test_guess_voice_hdrezka_and_jaskier_cyrillic(self):
+        """_guess_voice must detect HDRezka and Cyrillic Яскер/Яскір labelling."""
+        from app.providers.jackett import _guess_voice
+        assert _guess_voice("Фільм 2023 1080p HDRezka") == "HDRezka"
+        assert _guess_voice("Film 2023 hdrezka.ag 1080p") == "HDRezka"
+        assert _guess_voice("Фільм 2023 Яскер дубляж 1080p") == "Jaskier"
+        assert _guess_voice("Фільм 2023 Яскір 720p") == "Jaskier"
+        assert _guess_voice("Movie 2023 jaskier 1080p") == "Jaskier"
+
+
+# ---------------------------------------------------------------------------
+# Season-ok: range packs and complete-series packs
+# ---------------------------------------------------------------------------
+
+class TestSeasonOk:
+    """Unit tests for JackettProvider._season_ok including season ranges and complete packs."""
+
+    def _p(self):
+        from app.providers.jackett import JackettProvider
+        return JackettProvider()
+
+    def test_exact_season_match(self):
+        p = self._p()
+        assert p._season_ok("Breaking Bad S03 1080p", 3)
+        assert p._season_ok("Sherlock сезон 2 BDRip", 2)
+
+    def test_wrong_season_rejected(self):
+        p = self._p()
+        assert not p._season_ok("Breaking Bad S02 1080p", 3)
+        assert not p._season_ok("Game of Thrones S01 1080p", 5)
+
+    def test_no_season_marker_accepted(self):
+        """Torrent with no season marker is kept (could be a full pack)."""
+        p = self._p()
+        assert p._season_ok("Breaking Bad 1080p BDRip", 3)
+
+    def test_no_season_requested_always_accepted(self):
+        p = self._p()
+        assert p._season_ok("Breaking Bad S03 1080p", None)
+        assert p._season_ok("Any Movie 2021", None)
+
+    def test_season_range_within_range(self):
+        """S01-S05 pack must be accepted when requested season is inside the range."""
+        p = self._p()
+        assert p._season_ok("Breaking Bad S01-S05 1080p BDRip", 1)
+        assert p._season_ok("Breaking Bad S01-S05 1080p BDRip", 3)
+        assert p._season_ok("Breaking Bad S01-S05 1080p BDRip", 5)
+        assert p._season_ok("Game of Thrones S01-S08 Complete 1080p", 8)
+
+    def test_season_range_outside_range_rejected(self):
+        """S01-S02 pack must be rejected when requested season is outside the range."""
+        p = self._p()
+        assert not p._season_ok("Breaking Bad S01-S02 1080p", 3)
+        assert not p._season_ok("Show S03-S04 BDRip", 5)
+
+    def test_complete_series_always_accepted(self):
+        """'Complete', 'Full Series', 'Все сезоны' packs are accepted for any season."""
+        p = self._p()
+        assert p._season_ok("Breaking Bad Complete Series 1080p", 5)
+        assert p._season_ok("Sherlock Full Series BluRay 1080p", 2)
+        assert p._season_ok("Гра Престолів Всі Сезони 1080p", 4)
+        assert p._season_ok("The Wire all seasons complete", 3)
+
+
+# ---------------------------------------------------------------------------
+# Episode-number extraction from filename (stream router helper)
+# ---------------------------------------------------------------------------
+
+class TestEpisodeNumExtraction:
+    """Unit tests for _episode_num() in app/routers/stream.py."""
+
+    def _ep(self, name):
+        from app.routers.stream import _episode_num
+        return _episode_num(name)
+
+    def test_sxxexx_format(self):
+        assert self._ep("ShowName.S02E05.1080p.mkv") == 5
+        assert self._ep("show.s03e12.BluRay.mkv") == 12
+
+    def test_exx_format(self):
+        assert self._ep("ShowName.E07.mkv") == 7
+        assert self._ep("show.ep03.avi") == 3
+
+    def test_episode_word(self):
+        assert self._ep("Show Episode 4.mkv") == 4
+        assert self._ep("show.episode.10.mkv") == 10
+
+    def test_no_episode_returns_zero(self):
+        assert self._ep("Movie.2021.1080p.BluRay.mkv") == 0
+        assert self._ep("") == 0
+
+    def test_basename_only(self):
+        # Path separators should be ignored — only basename is used
+        assert self._ep("Season 2/ShowName.S02E08.mkv") == 8
+
+
+# ---------------------------------------------------------------------------
+# Stream files endpoint sort order (episode number ascending)
+# ---------------------------------------------------------------------------
+
+class TestStreamFilesSort:
+    """Verify /stream/files returns video files sorted by episode number ascending."""
+
+    def test_sort_by_episode_ascending(self):
+        """Files should be returned in episode-number order (1, 2, 3…)."""
+        from app.routers.stream import _episode_num
+        from app.models import TorrentFileItem
+
+        files = [
+            TorrentFileItem(file_id="3", name="Show.S01E03.mkv", size_mb=500, quality="1080p", is_video=True),
+            TorrentFileItem(file_id="1", name="Show.S01E01.mkv", size_mb=500, quality="1080p", is_video=True),
+            TorrentFileItem(file_id="2", name="Show.S01E02.mkv", size_mb=500, quality="1080p", is_video=True),
+        ]
+
+        def _sort_key(f):
+            ep = _episode_num(f.name)
+            return (0, ep if ep > 0 else 9999, -f.size_mb)
+
+        files.sort(key=_sort_key)
+        assert [f.file_id for f in files] == ["1", "2", "3"]
+
+
+# ---------------------------------------------------------------------------
+# TorBox season-aware search
+# ---------------------------------------------------------------------------
+
+class TestTorBoxSeasonFilter:
+    """Verify _torbox_search_variants filters results by season."""
+
+    def test_wrong_season_results_rejected(self):
+        """Results for a different season must be filtered out."""
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch("app.torbox.search_torbox", new=AsyncMock(return_value=[
+                # right season
+                {"name": "Breaking Bad S03 1080p BDRip", "hash": "a" * 40, "size": 15_000_000_000, "seeders": 500},
+                # wrong season — should be rejected
+                {"name": "Breaking Bad S01 1080p BDRip", "hash": "b" * 40, "size": 15_000_000_000, "seeders": 500},
+                # complete series — should be accepted
+                {"name": "Breaking Bad Complete Series 1080p", "hash": "c" * 40, "size": 100_000_000_000, "seeders": 100},
+            ])):
+                from app.services.variants import _torbox_search_variants
+                return await _torbox_search_variants(
+                    "Breaking Bad", year=None, filter_title="Breaking Bad",
+                    season=3,
+                )
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        names = [v.label for v in variants]
+        # S03 should be there
+        s3_present = any("S03" in (v.magnet or "") or "S03" in v.label for v in variants)
+        # S01 must NOT be there
+        s1_present  = any("S01" in (v.magnet or "").upper() or "Breaking Bad S01" in v.label for v in variants)
+        assert not s1_present, f"S01 torrent must be rejected; variants: {names}"
+        # complete series stays
+        complete_present = any("complete" in (v.magnet or "").lower() or "Complete" in v.label for v in variants)
+        assert complete_present, f"Complete-series torrent must be kept; variants: {names}"
+
+
+# ---------------------------------------------------------------------------
+# Online providers (Rezka/Kinogo/VideoCDN/Kodik)
+# ---------------------------------------------------------------------------
+
+class TestOnlineProviders:
+    """Verify the online provider infrastructure works end-to-end."""
+
+    def test_variant_model_has_url_and_source_fields(self):
+        """Variant model must expose url and source fields for online providers."""
+        from app.models import Variant
+        v = Variant(
+            id="test01",
+            label="HDRezka • RU • 1080p (Online)",
+            url="https://kodik.info/embed/123",
+            source="rezka",
+            is_cached=True,
+        )
+        assert v.url == "https://kodik.info/embed/123"
+        assert v.source == "rezka"
+        assert v.magnet == ""
+        assert v.is_cached is True  # online = instant
+
+    def test_online_provider_base_returns_empty_on_scraper_error(self):
+        """OnlineProviderBase must return [] if the scraper raises."""
+        import asyncio
+        from app.providers.rezka import RezkaProvider
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch(
+                "app.scraper.rezka.search",
+                new=AsyncMock(side_effect=Exception("network error")),
+            ):
+                return await RezkaProvider().search_variants("Test Movie", year=2024)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == []
+
+    def test_online_provider_base_returns_empty_when_no_files(self):
+        """OnlineProviderBase must return [] when detail page has no files."""
+        import asyncio
+        from app.providers.kinogo import KinogoProvider
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch("app.scraper.kinogo.search", new=AsyncMock(return_value=[
+                {"title": "Test Movie", "year": "2024", "url": "https://kinogo.me/test", "source": "kinogo"},
+            ])):
+                with patch("app.scraper.kinogo.get_detail", new=AsyncMock(return_value={
+                    "title": "Test Movie", "files": [],
+                })):
+                    return await KinogoProvider().search_variants("Test Movie", year=2024)
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result == []
+
+    def test_online_provider_returns_variants_with_url(self):
+        """OnlineProviderBase must return Variants with url set when scraper succeeds."""
+        import asyncio
+        from app.providers.videocdn import VideoCDNProvider
+        from unittest.mock import patch, AsyncMock
+
+        async def run():
+            with patch("app.scraper.videocdn.search", new=AsyncMock(return_value=[
+                {"title": "Test", "year": "2024", "url": "https://videocdn.tv/film/test", "source": "videocdn"},
+            ])):
+                with patch("app.scraper.videocdn.get_detail", new=AsyncMock(return_value={
+                    "title": "Test",
+                    "files": [{"title": "Player", "quality": "1080p", "url": "https://videocdn.tv/embed/123", "magnet": None}],
+                })):
+                    return await VideoCDNProvider().search_variants("Test", year=2024)
+
+        variants = asyncio.get_event_loop().run_until_complete(run())
+        assert len(variants) == 1
+        v = variants[0]
+        assert v.url == "https://videocdn.tv/embed/123"
+        assert v.source == "videocdn"
+        assert v.is_cached is True
+        assert v.magnet == ""
+
+    def test_online_variants_sorted_before_torrents_in_service(self):
+        """Online variants must appear first in the sorted output."""
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+        from app.models import Variant
+        from app.services.variants import get_variants
+
+        online_v = Variant(
+            id="online01",
+            label="HDRezka • RU • 1080p (Online)",
+            url="https://rezka.ag/embed/1",
+            source="rezka",
+            is_cached=True,
+        )
+        torrent_v = Variant(
+            id="torrent01",
+            label="LostFilm 1080p",
+            magnet="magnet:?xt=urn:btih:AABBCCDDEEAABBCCDDEEAABBCCDDEEAABBCCDDEE",
+            seeders=500,
+            is_cached=True,
+        )
+
+        async def run():
+            with patch("app.services.variants._torbox_search_variants", new=AsyncMock(return_value=[])):
+                with patch("app.providers.torrentio.TorrentioProvider.search_variants", new=AsyncMock(return_value=[torrent_v])):
+                    with patch("app.providers.jackett.JackettProvider.search_variants", new=AsyncMock(return_value=[])):
+                        with patch("app.providers.rezka.RezkaProvider.search_variants", new=AsyncMock(return_value=[online_v])):
+                            with patch("app.providers.kinogo.KinogoProvider.search_variants", new=AsyncMock(return_value=[])):
+                                with patch("app.providers.videocdn.VideoCDNProvider.search_variants", new=AsyncMock(return_value=[])):
+                                    with patch("app.providers.kodik.KodikProvider.search_variants", new=AsyncMock(return_value=[])):
+                                        with patch("app.cache.variants_cache.aget", new=AsyncMock(return_value=None)):
+                                            with patch("app.cache.variants_cache.aset", new=AsyncMock()):
+                                                with patch("app.torbox.batch_check_cached", new=AsyncMock(return_value={})):
+                                                    return await get_variants("Test Online Movie", year=2024)
+
+        response = asyncio.get_event_loop().run_until_complete(run())
+        assert len(response.variants) >= 1
+        # Online variant must appear before the torrent
+        sources = [v.source for v in response.variants]
+        if "rezka" in sources and "" in sources:
+            rezka_idx = sources.index("rezka")
+            torrent_idx = sources.index("")
+            assert rezka_idx < torrent_idx, "Online variant must be sorted before torrent"

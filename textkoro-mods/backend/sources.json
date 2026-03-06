@@ -1,0 +1,11 @@
+[
+  { "id": "veoveo", "name": "VeoVeo", "icon": "🎥", "vip": false, "quality": "HD, FullHD, 4K", "description": "Стабильный free источник", "balancer": "https://veoveo.cc" },
+  { "id": "videx", "name": "ViDEX", "icon": "📺", "vip": false, "quality": "HD, FullHD", "description": "Быстрый free источник", "balancer": "https://videx.cc" },
+  { "id": "mango", "name": "ManGo", "icon": "🍊", "vip": true, "quality": "4K HDR10+, FullHD", "description": "VIP релизы", "balancer": "https://mango.go" },
+  { "id": "fxpro", "name": "FXpro", "icon": "⭐", "vip": true, "quality": "4K HDR, +UA", "description": "VIP дубляж", "balancer": "https://fxpro.cc" },
+  { "id": "flixsod", "name": "FlixSOD", "icon": "🔥", "vip": true, "quality": "4K SDR, 1080p", "description": "VIP новинки", "balancer": "https://flixsod.cc" },
+  { "id": "alloha", "name": "Alloha", "icon": "🌊", "vip": true, "quality": "4K HDR", "description": "VIP быстрый", "balancer": "https://alloha.tv" },
+  { "id": "easy-mods", "name": "Easy-mods", "icon": "💎", "vip": false, "quality": "4K/HDR server stream", "description": "Главный серверный источник", "balancer": "about:blank" },
+  { "id": "hdrezka", "name": "HDRezka", "icon": "🎞️", "vip": true, "quality": "4K SDR", "description": "VIP классика", "balancer": "https://hdrezka.ag" },
+  { "id": "hdvb", "name": "HDVB", "icon": "📀", "vip": true, "quality": "FullHD, 4K", "description": "VIP сериалы", "balancer": "https://hdvb.cc" }
+]

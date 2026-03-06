@@ -1,0 +1,96 @@
+version: "3.9"
+
+# =============================================================================
+# Lampa Easy-Mod — полный стек одной командой
+#
+# Быстрый старт:
+#   1. Скопируйте .env.example в .env и заполните TORBOX_API_KEY
+#   2. docker compose up -d
+#   3. Откройте Jackett по адресу http://<ваш-ip>:9117 и добавьте трекеры
+#
+# Остановка:
+#   docker compose down
+#
+# Просмотр логов:
+#   docker compose logs -f backend
+#
+# Обновление после git pull (НЕ используйте docker compose down — это сбросит
+# кеш Redis):
+#   ./update.sh                        # обычное обновление
+#   ./update.sh --no-cache             # при изменении requirements.txt
+#   docker compose up -d --no-deps --build backend   # ручной аналог
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Redis — кеш вариантов и задач стриминга
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Optimised for a 4 GB server: cap Redis at 512 MB, evict least-recently-used
+    # keys first so the cache never fills the RAM and stalls the backend.
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Jackett — агрегатор торрент-трекеров
+  # После первого запуска откройте http://<ip>:9117 в браузере,
+  # добавьте нужные индексеры (rutracker, kinozal, и т.д.),
+  # и скопируйте API Key в .env → JACKETT_API_KEY
+  # ---------------------------------------------------------------------------
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Kyiv
+    volumes:
+      - jackett_config:/config
+      - jackett_downloads:/downloads
+    ports:
+      - "9117:9117"
+
+  # ---------------------------------------------------------------------------
+  # Backend — FastAPI-сервер Easy-Mod
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override Redis URL to point at the compose service
+      - REDIS_URL=redis://redis:6379/0
+      # Jackett URL to point at the compose service (override .env if needed)
+      - JACKETT_URL=${JACKETT_URL:-http://jackett:9117}
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      jackett:
+        condition: service_started
+    volumes:
+      # Mount static files so the plugin JS is hot-reloadable without rebuild
+      - ./static:/app/static:ro
+
+volumes:
+  redis_data:
+  jackett_config:
+  jackett_downloads:

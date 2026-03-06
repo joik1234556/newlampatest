@@ -53,7 +53,7 @@ def search_zetflix(title: str, year: Optional[int] = None) -> list:
         query = f"{title} {year}"
 
     for mirror in ZETFLIX_MIRRORS:
-        search_url = mirror.rstrip("/") + "/index.php?do=search&subaction=search&q=" + _urlencode(query)
+        search_url = mirror.rstrip("/") + "/search/?do=search&subaction=search&q=" + _urlencode(query)
         try:
             html = _fetch(search_url)
             items = _parse_search_results(html, mirror)
@@ -138,8 +138,8 @@ def _parse_stream_string(decoded: str, page_url: str) -> list:
         m = re.match(r"(\d+p)\[(.+?)\]", line.strip())
         if m:
             quality, url = m.group(1), m.group(2)
-            # Pick first URL if multiple separated by '/'
-            url = url.split("/")[0].strip()
+            # Pick first URL if multiple separated by ' или '
+            url = url.split(" или ")[0].strip()
             if url:
                 streams.append({"quality": quality, "url": url, "translation": "Zetflix"})
     return streams

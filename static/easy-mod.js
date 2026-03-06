@@ -14,7 +14,8 @@
     { id: 'flixsod', name: 'FlixSOD', icon: '🔥', vip: true, quality: '4K SDR, 1080p', balancer: 'https://flixsod.cc' },
     { id: 'alloha', name: 'Alloha', icon: '🌊', vip: true, quality: '4K HDR, много озвучек', balancer: 'https://alloha.tv' },
     { id: 'easy-mods', name: 'Easy-mods', icon: '💎', vip: false, quality: 'Server stream: 4K/HDR/UA', special: true },
-    { id: 'hdrezka', name: 'HDRezka', icon: '🎞️', vip: true, quality: '4K SDR, дубляж', balancer: 'https://hdrezka.ag' },
+    { id: 'zetflix', name: 'Zetflix', icon: '🎬', vip: false, quality: 'HD, FullHD', special: true },
+    { id: 'hdrezka', name: 'HDRezka', icon: '🎞️', vip: false, quality: '4K SDR, дубляж', special: true },
     { id: 'hdvb', name: 'HDVB', icon: '📀', vip: true, quality: 'FullHD, 4K', balancer: 'https://hdvb.cc' },
     { id: 'collaps', name: 'Collaps', icon: '🔶', vip: false, quality: 'HD, FullHD', special: true },
     { id: 'bazon', name: 'Bazon', icon: '🟣', vip: false, quality: 'HD, FullHD', special: true }
@@ -417,6 +418,14 @@
 
       if (sourceId === 'bazon' && (event.type === 'select' || event.type === 'open' || event.type === 'start')) {
         searchBackendSource(state.currentCard, 'bazon', 'Bazon');
+      }
+
+      if (sourceId === 'zetflix' && (event.type === 'select' || event.type === 'open' || event.type === 'start')) {
+        searchBackendSource(state.currentCard, 'zetflix', 'Zetflix');
+      }
+
+      if (sourceId === 'hdrezka' && (event.type === 'select' || event.type === 'open' || event.type === 'start')) {
+        searchBackendSource(state.currentCard, 'hdrezka', 'HDRezka');
       }
     });
   }

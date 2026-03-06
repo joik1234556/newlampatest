@@ -107,7 +107,7 @@ def _parse_stream_string(decoded: str) -> list:
         if m:
             quality, url_part = m.group(1), m.group(2)
             # Multiple URLs separated by " или "
-            url = url_part.split(" или ")[0].split("/")[0].strip()
+            url = url_part.split(" или ")[0].strip()
             if url:
                 streams.append({"quality": quality, "url": url})
     return streams
